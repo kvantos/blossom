@@ -1,0 +1,6 @@
+*	Tab after stars
+	indented body  
+* Trailing ws   	
+  - item	
+
+	

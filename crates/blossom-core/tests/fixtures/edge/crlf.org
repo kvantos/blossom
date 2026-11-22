@@ -1,0 +1,8 @@
+#+TITLE: CRLF file
+* TODO First
+SCHEDULED: <2026-11-21 Sat>
+:PROPERTIES:
+:ID: abc
+:END:
+Body
+** Child

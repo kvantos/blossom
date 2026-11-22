@@ -1,0 +1,2 @@
+* Heading without trailing newline
+Body line

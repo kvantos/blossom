@@ -1,0 +1,8 @@
+* Unclosed drawer
+:PROPERTIES:
+:ID: x
+
+Body continues
+* Next
+:LOGBOOK:
+- State "DONE" from "TODO" [2026-11-20 Fri 10:00]

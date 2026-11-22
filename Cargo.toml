@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/orgize", "crates/blossom-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+orgize = { path = "crates/orgize" }
+proptest = "1"
+
+# Strict lints for our own crates. The vendored orgize fork does not opt in.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+
+# Carried over from upstream orgize: speeds up snapshot tests.
+[profile.dev.package]
+insta.opt-level = 3
+similar.opt-level = 3

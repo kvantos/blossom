@@ -1,0 +1,5 @@
+*bold* at line start
+*bold too*
+* Real heading
+*bold* in body
+**not heading** either

@@ -1,0 +1,9 @@
+:PROPERTIES:
+:ID: 1234-file
+:CATEGORY: notes
+:END:
+#+TITLE: File drawer
+#+FILETAGS: :a:b:
+
+Intro.
+* Heading

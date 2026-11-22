@@ -1,0 +1,32 @@
+# cargo-fuzz targets. Not a workspace member: running them needs nightly
+# (`cargo +nightly fuzz run roundtrip`), which requires rustup.
+[package]
+name = "blossom-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+orgize = { path = "../crates/orgize" }
+
+# Detach from the parent workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "splice"
+path = "fuzz_targets/splice.rs"
+test = false
+doc = false
+bench = false

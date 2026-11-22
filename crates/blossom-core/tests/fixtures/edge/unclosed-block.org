@@ -1,0 +1,6 @@
+* Unclosed block
+#+BEGIN_SRC rust
+fn main() {}
+* Not a heading?
+#+begin_quote
+quote

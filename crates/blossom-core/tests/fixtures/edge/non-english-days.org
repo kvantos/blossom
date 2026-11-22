@@ -1,0 +1,10 @@
+* TODO Deutsch
+SCHEDULED: <2026-11-21 Sa>
+* TODO Русский
+DEADLINE: <2026-11-21 сб. 10:00>
+* Français
+<2026-11-23 lun. +1w>
+* 日本語
+[2026-11-21 土]
+* No day name
+<2026-11-21>
