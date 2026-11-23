@@ -53,6 +53,8 @@ pub struct OpenVault {
     pub warning_days: i64,
     /// Capture templates.
     pub templates: Vec<Template>,
+    /// The attachments folder name.
+    pub attachments: String,
 }
 
 impl OpenVault {
@@ -66,6 +68,7 @@ impl OpenVault {
             index_dir: None,
             archive: config.archive_location().to_string(),
             warning_days: config.warning_days(),
+            attachments: config.attachments_folder().to_string(),
             templates: config.templates().unwrap_or_else(|e| {
                 eprintln!("blossom: {e}; using the built-in capture templates");
                 config::Config::default().templates().unwrap_or_default()
@@ -140,6 +143,45 @@ pub enum Request {
     Run(Op),
     /// Undo an operation's changes.
     Restore(Vec<Change>),
+    /// Read the image that `path` (a link path as written) in `file` points at.
+    LoadImage {
+        /// The org file.
+        file: String,
+        /// The link path.
+        path: String,
+    },
+    /// Store `bytes` as an attachment of `file`.
+    Attach {
+        /// The org file.
+        file: String,
+        /// The wanted file name.
+        name: String,
+        /// The content.
+        bytes: Arc<Vec<u8>>,
+    },
+    /// Copy a file (dropped on the window) in as an attachment of `file`.
+    AttachFile {
+        /// The org file.
+        file: String,
+        /// The file to copy.
+        source: PathBuf,
+    },
+    /// Read the diagram that `path` in `file` points at.
+    OpenDiagram {
+        /// The org file.
+        file: String,
+        /// The link path.
+        path: String,
+    },
+    /// Save a diagram: over the one at link `path`, or as a new attachment.
+    SaveDiagram {
+        /// The org file.
+        file: String,
+        /// The link path of an existing diagram.
+        path: Option<String>,
+        /// The SVG.
+        svg: Arc<String>,
+    },
 }
 
 /// What the worker reports.
@@ -182,6 +224,38 @@ pub enum Event {
     Done(Arc<Outcome>),
     /// An undo succeeded.
     Restored(String),
+    /// An image's bytes, or `None` when it can't be read.
+    Image {
+        /// The org file.
+        file: String,
+        /// The link path.
+        path: String,
+        /// The file's content.
+        data: Option<Arc<Vec<u8>>>,
+    },
+    /// An attachment was stored.
+    Attached {
+        /// The org file.
+        file: String,
+        /// The link path to write in it.
+        link: String,
+    },
+    /// A diagram to edit.
+    Diagram {
+        /// The org file.
+        file: String,
+        /// The link path.
+        path: String,
+        /// Its shapes.
+        shapes: Vec<crate::diagram::Shape>,
+    },
+    /// An existing diagram was saved.
+    DiagramSaved {
+        /// The org file.
+        file: String,
+        /// The link path.
+        path: String,
+    },
     /// Something failed.
     Error(String),
 }
@@ -335,11 +409,9 @@ fn run(inbox: &Receiver<Input>, myself: &Sender<Input>, emit: &mut dyn FnMut(Eve
                 }
                 emit(Event::Flushed);
             }
-            Input::Request(
-                r @ (Request::Agenda(_) | Request::Targets | Request::Run(_) | Request::Restore(_)),
-            ) => {
+            Input::Request(r) => {
                 if let Some(o) = open.as_mut() {
-                    handle_op(o, r, loaded.as_deref(), emit);
+                    handle_other(o, r, loaded.as_deref(), emit);
                 }
             }
             Input::Changed(g) => {
@@ -445,6 +517,18 @@ fn write_due(o: &mut Open, now: Instant, emit: &mut dyn FnMut(Event)) {
     }
 }
 
+/// Requests other than opening, loading, saving and flushing.
+fn handle_other(o: &mut Open, request: Request, loaded: Option<&str>, emit: &mut dyn FnMut(Event)) {
+    match request {
+        Request::LoadImage { .. }
+        | Request::Attach { .. }
+        | Request::AttachFile { .. }
+        | Request::OpenDiagram { .. }
+        | Request::SaveDiagram { .. } => handle_file(o, request, emit),
+        _ => handle_op(o, request, loaded, emit),
+    }
+}
+
 /// The agenda, refile-target and operation requests.
 fn handle_op(o: &mut Open, request: Request, loaded: Option<&str>, emit: &mut dyn FnMut(Event)) {
     match request {
@@ -473,6 +557,92 @@ fn handle_op(o: &mut Open, request: Request, loaded: Option<&str>, emit: &mut dy
                     emit(Event::Restored("Undone".into()));
                 }
                 Err(e) => emit(Event::Error(format!("Couldn't undo: {e}"))),
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Largest image the read view loads, and largest file attached by drop.
+const MAX_FILE: u64 = 64 * 1024 * 1024;
+
+/// Reads `full` if it is a file no bigger than [`MAX_FILE`].
+fn read_limited(full: &std::path::Path) -> Result<Vec<u8>, String> {
+    let meta = std::fs::metadata(full).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a file".into());
+    }
+    if meta.len() > MAX_FILE {
+        return Err(format!("larger than {} MB", MAX_FILE / 1024 / 1024));
+    }
+    std::fs::read(full).map_err(|e| e.to_string())
+}
+
+/// Images, attachments and diagrams.
+fn handle_file(o: &Open, request: Request, emit: &mut dyn FnMut(Event)) {
+    let folder = &o.settings.attachments;
+    match request {
+        Request::LoadImage { file, path } => {
+            let data = read_limited(&o.vault.resolve_link(&file, &path))
+                .ok()
+                .map(Arc::new);
+            emit(Event::Image { file, path, data });
+        }
+        Request::Attach { file, name, bytes } => {
+            match o.vault.attach(&file, folder, &name, &bytes) {
+                Ok((_, link)) => emit(Event::Attached { file, link }),
+                Err(e) => emit(Event::Error(format!("Couldn't attach {name}: {e}"))),
+            }
+        }
+        Request::AttachFile { file, source } => {
+            let name = source
+                .file_name()
+                .map_or_else(|| "attachment".into(), |n| n.to_string_lossy().into_owned());
+            let stored = read_limited(&source).and_then(|bytes| {
+                o.vault
+                    .attach(&file, folder, &name, &bytes)
+                    .map_err(|e| e.to_string())
+            });
+            match stored {
+                Ok((_, link)) => emit(Event::Attached { file, link }),
+                Err(e) => emit(Event::Error(format!("Couldn't attach {name}: {e}"))),
+            }
+        }
+        Request::OpenDiagram { file, path } => {
+            let full = o.vault.resolve_link(&file, &path);
+            let read = std::fs::read_to_string(&full)
+                .map_err(|e| e.to_string())
+                .and_then(|svg| crate::diagram::from_svg(&svg).map_err(|e| e.to_string()));
+            match read {
+                Ok(shapes) => emit(Event::Diagram { file, path, shapes }),
+                Err(e) => emit(Event::Error(format!("{path}: {e}"))),
+            }
+        }
+        Request::SaveDiagram { file, path, svg } => {
+            if let Some(path) = path {
+                let full = o.vault.resolve_link(&file, &path);
+                let saved = o
+                    .vault
+                    .relative_path(&full)
+                    .ok_or_else(|| "only diagrams inside the vault can be saved".to_string())
+                    .and_then(|rel| {
+                        let rev = o.vault.revision(&rel).map_err(|e| e.to_string())?;
+                        o.vault
+                            .write_bytes(&rel, svg.as_bytes(), rev)
+                            .map_err(|e| e.to_string())
+                    });
+                match saved {
+                    Ok(_) => emit(Event::DiagramSaved { file, path }),
+                    Err(e) => emit(Event::Error(format!("Couldn't save {path}: {e}"))),
+                }
+            } else {
+                let name = chrono::Local::now()
+                    .format("diagram-%Y%m%d-%H%M%S.svg")
+                    .to_string();
+                match o.vault.attach(&file, folder, &name, svg.as_bytes()) {
+                    Ok((_, link)) => emit(Event::Attached { file, link }),
+                    Err(e) => emit(Event::Error(format!("Couldn't save the diagram: {e}"))),
+                }
             }
         }
         _ => {}
@@ -738,7 +908,9 @@ mod tests {
         let vault = dir.join("v");
         fs::create_dir_all(&vault).unwrap();
         for (p, t) in files {
-            fs::write(vault.join(p), t).unwrap();
+            let full = vault.join(p);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, t).unwrap();
         }
         let h = Harness::start();
         h.send(Request::Open(OpenVault {
@@ -906,6 +1078,122 @@ mod tests {
         });
         let outlines: Vec<&str> = t.iter().map(|t| t.outline.as_str()).collect();
         assert_eq!(outlines, ["", "one", "two", "three"]);
+    }
+
+    #[test]
+    fn images_attachments_and_diagrams() {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, vault) = opened(dir.path(), &[("notes/a.org", "* one\n")]);
+        let file = || "notes/a.org".to_string();
+        h.send(Request::Attach {
+            file: file(),
+            name: "shot.png".into(),
+            bytes: Arc::new(b"PNG".to_vec()),
+        });
+        let link = h.wait(|e| match e {
+            Event::Attached { link, .. } => Some(link),
+            Event::Error(e) => panic!("{e}"),
+            _ => None,
+        });
+        assert_eq!(link, "attachments/a/shot.png");
+        h.send(Request::LoadImage {
+            file: file(),
+            path: link.clone(),
+        });
+        let data = h.wait(|e| match e {
+            Event::Image { data, .. } => Some(data),
+            _ => None,
+        });
+        assert_eq!(data.unwrap().as_slice(), b"PNG");
+        h.send(Request::LoadImage {
+            file: file(),
+            path: "nope.png".into(),
+        });
+        assert!(h.wait(|e| match e {
+            Event::Image { data, .. } => Some(data.is_none()),
+            _ => None,
+        }));
+        // A dropped file is copied in under its own name.
+        let outside = dir.path().join("photo.jpg");
+        fs::write(&outside, b"JPG").unwrap();
+        h.send(Request::AttachFile {
+            file: file(),
+            source: outside,
+        });
+        let link = h.wait(|e| match e {
+            Event::Attached { link, .. } => Some(link),
+            Event::Error(e) => panic!("{e}"),
+            _ => None,
+        });
+        assert_eq!(link, "attachments/a/photo.jpg");
+        // A new diagram, then edited and saved over.
+        let shape = crate::diagram::Shape::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            color: "#000000".into(),
+            width: 2.0,
+        };
+        h.send(Request::SaveDiagram {
+            file: file(),
+            path: None,
+            svg: Arc::new(crate::diagram::to_svg(std::slice::from_ref(&shape))),
+        });
+        let link = h.wait(|e| match e {
+            Event::Attached { link, .. } => Some(link),
+            Event::Error(e) => panic!("{e}"),
+            _ => None,
+        });
+        assert!(
+            link.starts_with("attachments/a/diagram-")
+                && std::path::Path::new(&link)
+                    .extension()
+                    .is_some_and(|e| e == "svg"),
+            "{link}"
+        );
+        h.send(Request::OpenDiagram {
+            file: file(),
+            path: link.clone(),
+        });
+        let shapes = h.wait(|e| match e {
+            Event::Diagram { shapes, .. } => Some(shapes),
+            Event::Error(e) => panic!("{e}"),
+            _ => None,
+        });
+        assert_eq!(shapes.len(), 1);
+        let two = vec![shapes[0].clone(), shapes[0].moved(30.0, 0.0)];
+        h.send(Request::SaveDiagram {
+            file: file(),
+            path: Some(link.clone()),
+            svg: Arc::new(crate::diagram::to_svg(&two)),
+        });
+        let saved_path = h.wait(|e| match e {
+            Event::DiagramSaved { path, .. } => Some(path),
+            Event::Error(e) => panic!("{e}"),
+            _ => None,
+        });
+        assert_eq!(saved_path, link);
+        let saved = fs::read_to_string(vault.join("notes").join(&link)).unwrap();
+        assert_eq!(crate::diagram::from_svg(&saved).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn plain_svgs_are_not_editable() {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, vault) = opened(dir.path(), &[("notes/a.org", "* one\n")]);
+        let file = || "notes/a.org".to_string();
+        // A plain SVG can't be edited.
+        fs::write(vault.join("notes/plain.svg"), "<svg/>").unwrap();
+        h.send(Request::OpenDiagram {
+            file: file(),
+            path: "plain.svg".into(),
+        });
+        let msg = h.wait(|e| match e {
+            Event::Error(e) => Some(e),
+            _ => None,
+        });
+        assert!(msg.contains("wasn't drawn in Blossom"), "{msg}");
     }
 
     #[test]

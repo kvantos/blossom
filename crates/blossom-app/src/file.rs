@@ -163,6 +163,8 @@ pub struct OpenFile {
     last_typing: Option<Instant>,
     /// Metadata panel fields.
     pub inputs: Inputs,
+    /// Images of this file's read view, by link path.
+    pub pictures: crate::read::Pictures,
 }
 
 /// The metadata panel's text fields.
@@ -193,6 +195,7 @@ impl OpenFile {
             redo: Vec::new(),
             last_typing: None,
             inputs: Inputs::default(),
+            pictures: crate::read::Pictures::new(),
         }
     }
 
@@ -419,6 +422,7 @@ pub fn title_spans(title: &str) -> Vec<Span> {
     match render::blocks(title).into_iter().next() {
         Some(Block::Paragraph(spans)) => spans,
         _ => vec![Span {
+            image: false,
             text: title.to_string(),
             style: render::Style::default(),
             link: None,

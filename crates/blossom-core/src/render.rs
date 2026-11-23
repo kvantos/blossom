@@ -33,6 +33,8 @@ pub struct Span {
     pub style: Style,
     /// The link target (`https://…`, `file:…`, `id:…`), if it is a link.
     pub link: Option<String>,
+    /// A link without a description to an image file: shown as the image.
+    pub image: bool,
 }
 
 /// One block of a read view.
@@ -64,6 +66,14 @@ pub enum Block {
     Table(Vec<Vec<Vec<Span>>>),
     /// `-----`
     Rule,
+    /// An image: a link without a description to an image file, as org
+    /// shows inline. Split out of its paragraph.
+    Image {
+        /// The link target as written, e.g. `file:img/a.png`.
+        target: String,
+        /// The file path: the target without `file:` and any `::search`.
+        path: String,
+    },
     /// A drawer other than properties.
     Drawer {
         /// Its name.
@@ -94,12 +104,68 @@ fn plain(text: &str) -> Span {
         text: text.to_string(),
         style: Style::default(),
         link: None,
+        image: false,
     }
+}
+
+/// Extensions shown inline as images.
+const IMAGE_EXTENSIONS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "svgz"];
+
+/// The file path of a link target that points at a local image file
+/// (`file:a.png`, `./a.png`, `/abs/a.svg`, `~/a.jpg`, with any `::search`
+/// dropped), or `None`.
+#[must_use]
+pub fn image_path(target: &str) -> Option<String> {
+    let path = if let Some(p) = target.strip_prefix("file:") {
+        p
+    } else if target.starts_with(['.', '/', '~']) {
+        target
+    } else {
+        return None;
+    };
+    let path = path.split("::").next().unwrap_or(path);
+    let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
+    (!path.is_empty() && IMAGE_EXTENSIONS.contains(&ext.as_str())).then(|| path.to_string())
+}
+
+/// A paragraph's spans split around its image links: text before an image
+/// becomes a paragraph above it, text after one below.
+fn split_images(spans: Vec<Span>, out: &mut Vec<Block>) {
+    let mut text: Vec<Span> = Vec::new();
+    let flush = |text: &mut Vec<Span>, out: &mut Vec<Block>| {
+        trim_trailing_newlines(text);
+        while text.first().is_some_and(|s| s.text.trim_start().is_empty()) {
+            text.remove(0);
+        }
+        if let Some(first) = text.first_mut() {
+            first.text = first.text.trim_start_matches(['\n', '\r']).to_string();
+        }
+        if !text.iter().all(|s| s.text.trim().is_empty()) {
+            out.push(Block::Paragraph(std::mem::take(text)));
+        }
+        text.clear();
+    };
+    for s in spans {
+        if s.image
+            && let Some(target) = s.link.clone()
+            && let Some(path) = image_path(&target)
+        {
+            flush(&mut text, out);
+            out.push(Block::Image { target, path });
+        } else {
+            text.push(s);
+        }
+    }
+    flush(&mut text, out);
 }
 
 fn element_blocks(parent: &SyntaxNode, out: &mut Vec<Block>) {
     for node in parent.children() {
-        if let Some(b) = element_block(&node) {
+        if node.kind() == SyntaxKind::PARAGRAPH {
+            let mut spans = Vec::new();
+            inline_spans(&node, Style::default(), &mut spans);
+            split_images(spans, out);
+        } else if let Some(b) = element_block(&node) {
             out.push(b);
         } else if node.kind() == SyntaxKind::LIST {
             list_items(&node, out);
@@ -127,15 +193,6 @@ fn strip_eol(s: &str) -> String {
 fn element_block(node: &SyntaxNode) -> Option<Block> {
     use SyntaxKind as K;
     Some(match node.kind() {
-        K::PARAGRAPH => {
-            let mut spans = Vec::new();
-            inline_spans(node, Style::default(), &mut spans);
-            trim_trailing_newlines(&mut spans);
-            if spans.iter().all(|s| s.text.trim().is_empty()) {
-                return None;
-            }
-            Block::Paragraph(spans)
-        }
         K::SOURCE_BLOCK | K::EXAMPLE_BLOCK | K::EXPORT_BLOCK => Block::Code {
             language: child(node, K::BLOCK_BEGIN)
                 .and_then(|b| token_text(&b, K::SRC_BLOCK_LANGUAGE))
@@ -316,7 +373,16 @@ fn inline_spans(node: &SyntaxNode, style: Style, out: &mut Vec<Span>) {
                     let mut label = Vec::new();
                     inline_spans(&n, style, &mut label);
                     if label.iter().all(|s| s.text.is_empty()) {
-                        push(out, &target, style, Some(&target));
+                        if image_path(&target).is_some() {
+                            out.push(Span {
+                                text: target.clone(),
+                                style,
+                                link: Some(target),
+                                image: true,
+                            });
+                        } else {
+                            push(out, &target, style, Some(&target));
+                        }
                     } else {
                         for s in label {
                             push(out, &s.text, s.style, Some(&target));
@@ -350,6 +416,7 @@ fn push(out: &mut Vec<Span>, text: &str, style: Style, link: Option<&str>) {
     if let Some(last) = out.last_mut()
         && last.style == style
         && last.link == link
+        && !last.image
     {
         last.text.push_str(text);
         return;
@@ -358,6 +425,7 @@ fn push(out: &mut Vec<Span>, text: &str, style: Style, link: Option<&str>) {
         text: text.to_string(),
         style,
         link,
+        image: false,
     });
 }
 
@@ -384,14 +452,14 @@ mod tests {
     #[test]
     fn paragraph_markup_and_links() {
         let b = blocks(
-            "Para *b* /i/ ~code~ [[https://x.org][the *label*]] [[file:a.png]] <2026-11-23 Mon>\nline two\n",
+            "Para *b* /i/ ~code~ [[https://x.org][the *label*]] [[file:a.txt]] <2026-11-23 Mon>\nline two\n",
         );
         let [Block::Paragraph(spans)] = b.as_slice() else {
             panic!("{b:?}")
         };
         assert_eq!(
             text(spans),
-            "Para b i code the label file:a.png <2026-11-23 Mon>\nline two"
+            "Para b i code the label file:a.txt <2026-11-23 Mon>\nline two"
         );
         let find = |t: &str| spans.iter().find(|s| s.text == t).unwrap();
         assert!(find("b").style.bold);
@@ -399,8 +467,34 @@ mod tests {
         assert!(find("code").style.code);
         assert!(find("label").style.bold);
         assert_eq!(find("label").link.as_deref(), Some("https://x.org"));
-        assert_eq!(find("file:a.png").link.as_deref(), Some("file:a.png"));
+        assert_eq!(find("file:a.txt").link.as_deref(), Some("file:a.txt"));
         assert!(find("<2026-11-23 Mon>").style.date);
+    }
+
+    #[test]
+    fn images_split_paragraphs() {
+        let b = blocks(
+            "See [[file:img/a.png]] here\n[[./b.SVG]]\n[[file:c.png][described]] [[https://x/y.png]]\n- [[~/d.jpg]]\n",
+        );
+        let img = |t: &str, p: &str| Block::Image {
+            target: t.into(),
+            path: p.into(),
+        };
+        assert_eq!(b[0], Block::Paragraph(vec![plain("See ")]));
+        assert_eq!(b[1], img("file:img/a.png", "img/a.png"));
+        assert_eq!(b[2], Block::Paragraph(vec![plain(" here")]));
+        assert_eq!(b[3], img("./b.SVG", "./b.SVG"));
+        let Block::Paragraph(rest) = &b[4] else {
+            panic!("{b:?}")
+        };
+        assert_eq!(text(rest), "described https://x/y.png");
+        let Block::ListItem { children, .. } = &b[5] else {
+            panic!("{b:?}")
+        };
+        assert_eq!(children, &[img("~/d.jpg", "~/d.jpg")]);
+        assert_eq!(image_path("file:a.png::search").as_deref(), Some("a.png"));
+        assert_eq!(image_path("file:notes.org"), None);
+        assert_eq!(image_path("id:abc.png"), None);
     }
 
     #[test]

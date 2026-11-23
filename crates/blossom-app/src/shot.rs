@@ -25,6 +25,8 @@ pub struct Plan {
     pub agenda: bool,
     /// Open the capture panel before capturing.
     pub capture: bool,
+    /// Open this diagram (a link path in the file) before capturing.
+    pub diagram: Option<String>,
 }
 
 impl Plan {
@@ -46,6 +48,7 @@ impl Plan {
             edit: std::env::var_os("BLOSSOM_SCREENSHOT_EDIT").is_some(),
             agenda: std::env::var_os("BLOSSOM_SCREENSHOT_AGENDA").is_some(),
             capture: std::env::var_os("BLOSSOM_SCREENSHOT_CAPTURE").is_some(),
+            diagram: std::env::var("BLOSSOM_SCREENSHOT_DIAGRAM").ok(),
         })
     }
 }

@@ -120,6 +120,8 @@ pub enum Command {
     Done,
     /// Enter, with list continuation.
     Enter,
+    /// Ctrl/Cmd+V: an image on the clipboard is attached, text is pasted.
+    Paste,
 }
 
 /// The editor's key bindings: iced's defaults plus undo/redo, Escape to
@@ -143,6 +145,9 @@ pub fn bindings<M>(on: fn(Command) -> M) -> impl Fn(KeyPress) -> Option<Binding<
             }
             Key::Character(c) if m.command() && c.eq_ignore_ascii_case("y") => {
                 return Some(Binding::Custom(on(Command::Redo)));
+            }
+            Key::Character(c) if m.command() && !m.shift() && c.eq_ignore_ascii_case("v") => {
+                return Some(Binding::Custom(on(Command::Paste)));
             }
             Key::Named(key::Named::Escape) => return Some(Binding::Custom(on(Command::Done))),
             Key::Named(key::Named::Enter) if m == keyboard::Modifiers::empty() => {

@@ -29,6 +29,8 @@ pub struct Config {
     pub archive: Option<String>,
     /// Capture templates; none means the built-in ones.
     pub capture: Vec<CaptureConfig>,
+    /// The attachments folder name, beside each org file. Default `attachments`.
+    pub attachments: Option<String>,
 }
 
 /// One `[[capture]]` table.
@@ -88,6 +90,15 @@ impl Config {
         self.inbox
             .clone()
             .unwrap_or_else(|| "inbox.org".to_string())
+    }
+
+    /// The attachments folder name.
+    #[must_use]
+    pub fn attachments_folder(&self) -> &str {
+        self.attachments
+            .as_deref()
+            .filter(|f| !f.trim().is_empty())
+            .unwrap_or(crate::attach::DEFAULT_FOLDER)
     }
 
     /// The deadline warning window in days.

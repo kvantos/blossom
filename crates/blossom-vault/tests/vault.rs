@@ -361,3 +361,28 @@ mod ops {
         ));
     }
 }
+
+#[test]
+fn attachments_are_stored_beside_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = dir.path();
+    put(r, "notes/work.org", "* a\n");
+    let v = vault(r);
+    let (path, link) = v
+        .attach("notes/work.org", "attachments", "shot.png", b"png")
+        .unwrap();
+    assert_eq!(path, "notes/attachments/work/shot.png");
+    assert_eq!(link, "attachments/work/shot.png");
+    let (path2, _) = v
+        .attach("notes/work.org", "attachments", "shot.png", b"x")
+        .unwrap();
+    assert_eq!(path2, "notes/attachments/work/shot-1.png");
+    assert_eq!(fs::read(r.join(&path)).unwrap(), b"png");
+    // Not listed as notes.
+    assert_eq!(v.list().unwrap().files.len(), 1);
+    let full = v.resolve_link("notes/work.org", &link);
+    assert_eq!(fs::read(&full).unwrap(), b"png");
+    assert_eq!(v.relative_path(&full).as_deref(), Some(path.as_str()));
+    assert_eq!(v.relative_path(Path::new("/etc/hosts")), None);
+    assert!(v.resolve_link("a.org", "/abs/x.png").ends_with("abs/x.png"));
+}

@@ -137,9 +137,18 @@ Notes from Phase 5:
 - Screenshot hook: `BLOSSOM_SCREENSHOT_AGENDA=1`, `BLOSSOM_SCREENSHOT_CAPTURE=1`.
 
 ## Phase 6: images and diagrams
-- [ ] Inline `[[file:…png|jpg|svg]]` in read view.
-- [ ] Paste/drag image → attachments folder + link.
-- [ ] Diagram canvas (pen, line, arrow, rect, ellipse, text, select/move, delete, undo, snap); SVG with JSON `<metadata>`.
+- [x] Inline `[[file:…png|jpg|svg]]` in read view.
+- [x] Paste/drag image → attachments folder + link.
+- [x] Diagram canvas (pen, line, arrow, rect, ellipse, text, select/move, delete, undo, snap); SVG with JSON `<metadata>`.
+
+Notes from Phase 6:
+- Inline images follow org (and Bloom's `ParagraphImages`): a link without a description to a local png/jpg/jpeg/gif/webp/bmp/svg (`file:x`, `./x`, `/x`, `~/x`; `::search` dropped) becomes `render::Block::Image`, splitting its paragraph. Links with a description, and remote images, stay links. Each image has a caption with its path and an Open (or "Edit diagram" for SVG) button.
+- The worker reads image bytes (`Request::LoadImage`, up to 64 MB); the app keeps them per open file (`OpenFile::pictures`) and shows "Missing image" for one that can't be read. Handles are made from bytes, so a re-saved diagram shows its new content.
+- Attachments (`blossom_vault::attach`, names from Bloom's `AttachmentNames`): `notes/work.org`'s go in `notes/attachments/work/` (config `attachments` sets the folder name), with a safe, unique name; the link is relative to the org file. Not org-attach (`:ID:` folders, `attachment:` links); `.org`-only listing means attachments never show as notes.
+- Dropping files on the window attaches them to the open file; Ctrl/Cmd+V attaches a clipboard image as `pasted-YYYYMMDD-HHMMSS.png` (via `arboard`, encoded with `image`), else pastes text in the editor as before. The link goes at the editor's cursor, or at the end of the selected heading's own text (`Document::append_line`, new).
+- Diagrams (`diagram.rs` model and SVG, `draw.rs` iced canvas editor): "Diagram…" in the read view starts one; "Edit diagram" under an SVG reopens it if it has Blossom metadata (`<metadata><blossom-diagram xmlns="urn:blossom:diagram">{"version":1,"shapes":[…]}</blossom-diagram></metadata>`). Shapes are pen, line, arrow, rectangle, ellipse and text, five colours, 10 px snap (on by default), select and drag to move, Delete, Ctrl/Cmd+Z/Y. The canvas and the saved file are white, so drawings read the same in Emacs and in dark mode. Saved as `diagram-YYYYMMDD-HHMMSS.svg` in the attachments folder; re-saving overwrites in place (only inside the vault). The SVG is cropped to the drawing plus a 16 px margin, and the JSON uses the SVG's coordinates.
+- New dependencies: iced features `canvas`, `image`, `svg`; `arboard` 3.7 (`image-data`, `wayland-data-control`); `image` 0.25 (png only; the same version iced uses).
+- Screenshot hook: `BLOSSOM_SCREENSHOT_DIAGRAM=<link path>` opens that diagram.
 
 ## Later
 rowan/nom upgrade; nightly fuzzing; packaging (.app signing/notarization, AppImage/Flatpak/AUR); `blsm` name-clash check; semantic search.

@@ -12,12 +12,16 @@ name = "blossom"
 path = "src/main.rs"
 
 [dependencies]
+arboard.workspace = true
 blossom-core.workspace = true
 blossom-index.workspace = true
 blossom-vault.workspace = true
 chrono = { workspace = true, features = ["clock"] }
 iced.workspace = true
+image.workspace = true
 rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,9 +1,16 @@
 //! The read view: core's render blocks as iced widgets.
+//!
+//! Images are drawn from [`Picture`]s the app loads through the worker,
+//! keyed by the link path as written; one not loaded yet shows its name.
+
+use std::collections::HashMap;
 
 use blossom_core::render::{Block, Span, Style};
 use iced::widget::text::Span as TextSpan;
-use iced::widget::{checkbox, column, container, rich_text, row, rule, span, text};
-use iced::{Color, Element, Fill, Font, Theme, font};
+use iced::widget::{
+    button, checkbox, column, container, image, rich_text, row, rule, span, svg, text,
+};
+use iced::{Color, ContentFit, Element, Fill, Font, Length, Theme, font};
 
 use crate::style;
 
@@ -37,7 +44,28 @@ pub struct Actions<M> {
     /// The checkbox of the item at this byte offset (in the rendered text)
     /// was clicked.
     pub check: fn(usize) -> M,
+    /// An image's button: the link path as written.
+    pub image: fn(String) -> M,
 }
+
+/// An image for the read view.
+#[derive(Clone, Debug)]
+pub enum Picture {
+    /// Being read.
+    Loading,
+    /// A bitmap.
+    Raster(image::Handle),
+    /// An SVG.
+    Svg(svg::Handle),
+    /// The file isn't there or can't be read.
+    Missing,
+}
+
+/// Loaded images, by link path.
+pub type Pictures = HashMap<String, Picture>;
+
+/// Widest an inline image is drawn.
+const MAX_IMAGE_WIDTH: f32 = 760.0;
 
 // Function pointers are `Copy` whatever `M` is, which a derive can't see.
 impl<M> Clone for Actions<M> {
@@ -49,16 +77,93 @@ impl<M> Clone for Actions<M> {
 impl<M> Copy for Actions<M> {}
 
 /// The blocks as a column.
-pub fn blocks<'a, M: Clone + 'a>(blocks: &'a [Block], ink: Ink, on: Actions<M>) -> Element<'a, M> {
-    column(blocks.iter().map(|b| block(b, ink, on)))
+pub fn blocks<'a, M: Clone + 'a>(
+    blocks: &'a [Block],
+    ink: Ink,
+    on: Actions<M>,
+    pictures: &'a Pictures,
+) -> Element<'a, M> {
+    column(blocks.iter().map(|b| block(b, ink, on, pictures)))
         .spacing(10)
         .width(Fill)
         .into()
 }
 
-fn block<'a, M: Clone + 'a>(b: &'a Block, ink: Ink, on: Actions<M>) -> Element<'a, M> {
+/// Every image path in `blocks`, nested ones included.
+#[must_use]
+pub fn image_paths(blocks: &[Block]) -> Vec<String> {
+    let mut out = Vec::new();
+    for b in blocks {
+        match b {
+            Block::Image { path, .. } => out.push(path.clone()),
+            Block::ListItem { children, .. } | Block::Quote(children) => {
+                out.extend(image_paths(children));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn picture<'a, M: Clone + 'a>(
+    path: &'a str,
+    on: Actions<M>,
+    pictures: &'a Pictures,
+) -> Element<'a, M> {
+    let shown: Option<Element<'a, M>> = match pictures.get(path) {
+        Some(Picture::Raster(h)) => Some(
+            image(h.clone())
+                .content_fit(ContentFit::ScaleDown)
+                .width(Length::Shrink)
+                .into(),
+        ),
+        Some(Picture::Svg(h)) => Some(
+            svg(h.clone())
+                .content_fit(ContentFit::ScaleDown)
+                .width(Length::Shrink)
+                .into(),
+        ),
+        Some(Picture::Missing) => None,
+        Some(Picture::Loading) | None => Some(text("Loading image…").size(12).into()),
+    };
+    let is_svg = std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+    let dim = |t: &Theme| text::Style {
+        color: Some(style::dim(t)),
+    };
+    let caption = row![
+        text(if shown.is_some() {
+            path.to_string()
+        } else {
+            format!("Missing image: {path}")
+        })
+        .size(11)
+        .style(dim)
+        .width(Fill),
+        button(text(if is_svg { "Edit diagram" } else { "Open" }).size(11))
+            .on_press((on.image)(path.to_string()))
+            .padding([1, 6])
+            .style(button::text),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    let mut col = column![].spacing(2).max_width(MAX_IMAGE_WIDTH);
+    if let Some(s) = shown {
+        col = col.push(container(s).padding(1).style(style::picture));
+    }
+    col.push(caption).into()
+}
+
+fn block<'a, M: Clone + 'a>(
+    b: &'a Block,
+    ink: Ink,
+    on: Actions<M>,
+    pictures: &'a Pictures,
+) -> Element<'a, M> {
     let on_link = on.link;
     match b {
+        Block::Image { path, .. } => picture(path, on, pictures),
         Block::Paragraph(spans) => paragraph(spans, ink, on_link),
         Block::ListItem {
             bullet,
@@ -82,7 +187,7 @@ fn block<'a, M: Clone + 'a>(b: &'a Block, ink: Ink, on: Actions<M>) -> Element<'
             };
             row![
                 container(marker).width(22),
-                column(children.iter().map(|c| block(c, ink, on)))
+                column(children.iter().map(|c| block(c, ink, on, pictures)))
                     .spacing(4)
                     .width(Fill)
             ]
@@ -112,7 +217,7 @@ fn block<'a, M: Clone + 'a>(b: &'a Block, ink: Ink, on: Actions<M>) -> Element<'
                 .into()
         }
         Block::Quote(inner) => {
-            container(column(inner.iter().map(|c| block(c, ink, on))).spacing(8))
+            container(column(inner.iter().map(|c| block(c, ink, on, pictures))).spacing(8))
                 .padding([8, 14])
                 .width(Fill)
                 .style(style::quote)

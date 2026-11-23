@@ -14,6 +14,12 @@
 //! capture, refile, archive) run in the worker as an [`Op`]; the notice bar
 //! then offers to undo them, which restores the files only if nothing
 //! changed them since.
+//!
+//! Images in the read view are read by the worker and cached per open file.
+//! A file dropped on the window, or an image pasted with Ctrl/Cmd+V, is
+//! stored as an attachment and linked at the cursor (when editing) or at
+//! the end of the selected heading. Diagrams open in their own editor in
+//! the main area.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -36,11 +42,12 @@ use iced::widget::{
 use iced::{Element, Fill, Font, Length, Subscription, Task, Theme, font, window};
 
 use crate::agenda;
+use crate::draw::{self, DiagramEditor};
 use crate::editor::{self, Command};
 use crate::file::{DiskCopy, DiskState, Group, OpenFile, SectionEditor, Selected};
 use crate::outline;
 use crate::panels::{self, CapturePanel, RefilePicker};
-use crate::read::{self, Actions, Ink};
+use crate::read::{self, Actions, Ink, Picture};
 use crate::shot;
 use crate::style::{self, Chip};
 use crate::tree::{self, FileInfo};
@@ -85,10 +92,23 @@ pub struct App {
     notice: Option<(String, Option<Vec<Change>>)>,
     /// The capture panel, while open.
     capture: Option<CapturePanel>,
-    /// A capture was sent and its result is awaited.
-    capture_sent: bool,
+    /// A capture or diagram save was sent and its result is awaited.
+    awaiting: Awaiting,
     /// The refile picker, while open.
     refile: Option<RefilePicker>,
+    /// The diagram editor, while open.
+    diagram: Option<DiagramEditor>,
+}
+
+/// A save whose result closes its panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Awaiting {
+    /// Nothing.
+    Nothing,
+    /// A capture.
+    Capture,
+    /// A diagram.
+    Diagram,
 }
 
 /// What the main area shows.
@@ -193,6 +213,22 @@ pub enum Message {
     RefileCancel,
     /// Archive the selected heading.
     Archive,
+    /// An image's button in the read view: its link path.
+    ImageAction(String),
+    /// The clipboard's image as PNG, if it had one.
+    Pasted(Option<Arc<Vec<u8>>>),
+    /// The clipboard's text, for the editor.
+    PasteText(Option<String>),
+    /// A file was dropped on the window.
+    Dropped(PathBuf),
+    /// Start a new diagram for the selected heading.
+    NewDiagram,
+    /// A change in the diagram editor.
+    Diagram(draw::Edit),
+    /// Save the diagram.
+    DiagramSave,
+    /// Close the diagram editor without saving.
+    DiagramCancel,
 }
 
 /// A metadata panel text field.
@@ -242,8 +278,9 @@ impl App {
             pending_heading: None,
             notice: None,
             capture: None,
-            capture_sent: false,
+            awaiting: Awaiting::Nothing,
             refile: None,
+            diagram: None,
         };
         if forced.is_some() {
             return (app, Task::none());
@@ -277,11 +314,39 @@ impl App {
             iced::system::theme_changes().map(Message::Mode),
             keyboard::listen().map(Message::Key),
             window::close_requests().map(|_| Message::CloseRequested),
+            iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Window(window::Event::FileDropped(path)) => {
+                    Some(Message::Dropped(path))
+                }
+                _ => None,
+            }),
         ])
     }
 
-    /// Applies a message.
+    /// Applies a message, then asks the worker for any image the read view
+    /// shows that isn't loaded yet.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_inner(message);
+        self.request_pictures();
+        task
+    }
+
+    fn request_pictures(&mut self) {
+        let (Some(f), Some(w)) = (&mut self.file, &self.worker) else {
+            return;
+        };
+        for path in read::image_paths(&f.blocks) {
+            if !f.pictures.contains_key(&path) {
+                f.pictures.insert(path.clone(), Picture::Loading);
+                w.send(Request::LoadImage {
+                    file: f.path.clone(),
+                    path,
+                });
+            }
+        }
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Worker(event) => return self.on_worker(event),
             Message::Mode(mode) => {
@@ -346,6 +411,7 @@ impl App {
             Message::StopEditing | Message::EditorCommand(Command::Done) => self.stop_editing(),
             Message::EditorAction(action) => self.editor_action(action),
             Message::EditorCommand(Command::Enter) => self.enter(),
+            Message::EditorCommand(Command::Paste) => return paste(),
             Message::EditorCommand(Command::Undo) | Message::Undo => self.undo(false),
             Message::EditorCommand(Command::Redo) | Message::Redo => self.undo(true),
             Message::SetKeyword(k) => {
@@ -426,7 +492,7 @@ impl App {
             Message::CaptureSave => self.save_capture(),
             Message::CaptureCancel => {
                 self.capture = None;
-                self.capture_sent = false;
+                self.awaiting = Awaiting::Nothing;
             }
             Message::StartRefile => return self.start_refile(),
             Message::RefileFilter(f) => {
@@ -459,6 +525,87 @@ impl App {
                     eprintln!("blossom: screenshot: {e}");
                 }
                 return iced::exit();
+            }
+            other => return self.update_files(other),
+        }
+        Task::none()
+    }
+
+    /// Images, paste, drop and diagram messages.
+    fn update_files(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::ImageAction(path) => self.image_action(path),
+            Message::Pasted(Some(bytes)) => {
+                if let Some(f) = self.file.as_ref().filter(|f| f.doc.is_some() && !f.missing)
+                    && let Some(w) = &self.worker
+                {
+                    let name = chrono::Local::now()
+                        .format("pasted-%Y%m%d-%H%M%S.png")
+                        .to_string();
+                    w.send(Request::Attach {
+                        file: f.path.clone(),
+                        name,
+                        bytes,
+                    });
+                }
+            }
+            Message::Pasted(None) => {
+                if self.file.as_ref().is_some_and(|f| f.editor.is_some()) {
+                    return iced::clipboard::read().map(Message::PasteText);
+                }
+            }
+            Message::PasteText(Some(t)) => {
+                self.editor_action(Action::Edit(Edit::Paste(Arc::new(t))));
+            }
+            Message::Dropped(source) => {
+                match self.file.as_ref().filter(|f| f.doc.is_some() && !f.missing) {
+                    Some(f) => {
+                        if let Some(w) = &self.worker {
+                            w.send(Request::AttachFile {
+                                file: f.path.clone(),
+                                source,
+                            });
+                        }
+                    }
+                    None => self.status = Some("Open a file to attach to first".into()),
+                }
+            }
+            Message::NewDiagram => {
+                if let Some(f) = self.file.as_ref().filter(|f| f.doc.is_some() && !f.missing) {
+                    self.diagram = Some(DiagramEditor::new(f.path.clone(), None, None, Vec::new()));
+                    self.awaiting = Awaiting::Nothing;
+                }
+            }
+            Message::Diagram(edit) => {
+                if let Some(d) = &mut self.diagram {
+                    d.update(edit);
+                }
+            }
+            Message::DiagramSave => {
+                if let Some(d) = &self.diagram
+                    && let Some(w) = &self.worker
+                {
+                    w.send(Request::SaveDiagram {
+                        file: d.file.clone(),
+                        path: d.link.clone(),
+                        svg: Arc::new(crate::diagram::to_svg(&d.shapes)),
+                    });
+                    self.awaiting = Awaiting::Diagram;
+                }
+            }
+            Message::DiagramCancel => {
+                if let Some(d) = &mut self.diagram
+                    && d.changed()
+                    && !d.discard_warned
+                {
+                    d.discard_warned = true;
+                    self.status = Some(
+                        "The diagram has unsaved changes: Cancel again to discard them".into(),
+                    );
+                } else {
+                    self.diagram = None;
+                    self.awaiting = Awaiting::Nothing;
+                }
             }
             _ => {}
         }
@@ -570,8 +717,12 @@ impl App {
             Event::Agenda(_) | Event::Targets(_) | Event::Done(_) | Event::Restored(_) => {
                 return self.on_op_event(event);
             }
+            Event::Image { .. }
+            | Event::Attached { .. }
+            | Event::Diagram { .. }
+            | Event::DiagramSaved { .. } => return self.on_file_event(event),
             Event::Error(e) => {
-                self.capture_sent = false;
+                self.awaiting = Awaiting::Nothing;
                 self.status = Some(e);
             }
         }
@@ -597,7 +748,8 @@ impl App {
                 }
             }
             Event::Done(out) => {
-                if std::mem::take(&mut self.capture_sent) {
+                if self.awaiting == Awaiting::Capture {
+                    self.awaiting = Awaiting::Nothing;
                     self.capture = None;
                 }
                 self.notice = Some((out.message.clone(), Some(out.changes.clone())));
@@ -606,6 +758,95 @@ impl App {
             _ => {}
         }
         Task::none()
+    }
+
+    /// Worker events about images, attachments and diagrams.
+    fn on_file_event(&mut self, event: Event) -> Task<Message> {
+        let mut shot_task = None;
+        match event {
+            Event::Image { file, path, data } => {
+                if let Some(f) = self.file.as_mut().filter(|f| f.path == file) {
+                    let picture = match data {
+                        None => Picture::Missing,
+                        Some(bytes) if is_svg(&path) => {
+                            Picture::Svg(iced::widget::svg::Handle::from_memory((*bytes).clone()))
+                        }
+                        Some(bytes) => Picture::Raster(iced::widget::image::Handle::from_bytes(
+                            (*bytes).clone(),
+                        )),
+                    };
+                    f.pictures.insert(path, picture);
+                }
+            }
+            Event::Attached { file, link } => {
+                if self.awaiting == Awaiting::Diagram {
+                    self.awaiting = Awaiting::Nothing;
+                    self.diagram = None;
+                }
+                self.insert_link(&file, &link);
+            }
+            Event::Diagram { file, path, shapes } => {
+                if self.shot.as_ref().is_some_and(|p| p.diagram.is_some()) {
+                    shot_task = Some(capture());
+                }
+                self.diagram = Some(DiagramEditor::new(
+                    file,
+                    Some(path.clone()),
+                    Some(PathBuf::from(path)),
+                    shapes,
+                ));
+                self.awaiting = Awaiting::Nothing;
+            }
+            Event::DiagramSaved { file, path } => {
+                self.diagram = None;
+                self.awaiting = Awaiting::Nothing;
+                if let Some(f) = self.file.as_mut().filter(|f| f.path == file) {
+                    f.pictures.remove(&path);
+                }
+                self.notice = Some((format!("Saved {path}"), None));
+            }
+            _ => {}
+        }
+        shot_task.unwrap_or_else(Task::none)
+    }
+
+    /// Links an attachment of `file`: at the editor's cursor, else at the
+    /// end of the selected heading (or the top of the file).
+    fn insert_link(&mut self, file: &str, link: &str) {
+        let text = format!("[[file:{link}]]");
+        let Some(f) = self.file.as_ref().filter(|f| f.path == file) else {
+            self.status = Some(format!("Attached {link} to {file}; it isn't linked yet"));
+            return;
+        };
+        if f.editor.is_some() {
+            self.editor_action(Action::Edit(Edit::Paste(Arc::new(text))));
+            return;
+        }
+        let at = match f.selected {
+            Selected::Heading(i) => Some(i),
+            _ => None,
+        };
+        self.edit_doc(|d| d.append_line(at, &text).map(drop));
+        self.notice = Some((format!("Attached {link}"), None));
+    }
+
+    /// An image's button: edit a diagram, open anything else.
+    fn image_action(&mut self, path: String) {
+        let Some(f) = &self.file else { return };
+        if is_svg(&path) {
+            if let Some(w) = &self.worker {
+                w.send(Request::OpenDiagram {
+                    file: f.path.clone(),
+                    path,
+                });
+            }
+            return;
+        }
+        let Some(root) = &self.root else { return };
+        let full = blossom_vault::attach::resolve(root, &f.path, &path);
+        if let Err(e) = open_externally(&full.to_string_lossy()) {
+            self.status = Some(format!("Couldn't open {path}: {e}"));
+        }
     }
 
     fn open_heading(&mut self, path: String, index: usize) {
@@ -666,7 +907,7 @@ impl App {
         }
         let now = chrono::Local::now().naive_local();
         self.capture = Some(CapturePanel::new(&self.template.templates, 0, now));
-        self.capture_sent = false;
+        self.awaiting = Awaiting::Nothing;
         iced::widget::operation::focus(panels::CAPTURE_EDITOR)
     }
 
@@ -685,7 +926,7 @@ impl App {
             target: t.target.clone(),
             entry,
         };
-        self.capture_sent = true;
+        self.awaiting = Awaiting::Capture;
         self.run(op);
     }
 
@@ -1045,11 +1286,34 @@ impl App {
         let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
             return Task::none();
         };
+        if self.diagram.is_some() {
+            let edit = match key.as_ref() {
+                Key::Named(keyboard::key::Named::Delete | keyboard::key::Named::Backspace) => {
+                    Some(draw::Edit::Delete)
+                }
+                Key::Named(keyboard::key::Named::Escape) => Some(draw::Edit::Select(None)),
+                Key::Character(c) if modifiers.command() && c.eq_ignore_ascii_case("z") => {
+                    Some(if modifiers.shift() {
+                        draw::Edit::Redo
+                    } else {
+                        draw::Edit::Undo
+                    })
+                }
+                Key::Character(c) if modifiers.command() && c.eq_ignore_ascii_case("y") => {
+                    Some(draw::Edit::Redo)
+                }
+                _ => None,
+            };
+            if let (Some(e), Some(d)) = (edit, &mut self.diagram) {
+                d.update(e);
+            }
+            return Task::none();
+        }
         if matches!(key, Key::Named(keyboard::key::Named::Escape)) {
             if self.refile.take().is_some() {
                 return Task::none();
             }
-            if self.capture.is_some() && !self.capture_sent {
+            if self.capture.is_some() && self.awaiting != Awaiting::Capture {
                 self.capture = None;
                 return Task::none();
             }
@@ -1066,6 +1330,9 @@ impl App {
                 return self.update(Message::PickFolder);
             }
             Key::Character(c) if c.eq_ignore_ascii_case("n") => return self.open_capture(),
+            Key::Character(c) if c.eq_ignore_ascii_case("v") && !modifiers.shift() => {
+                return paste();
+            }
             Key::Character(c) if c.eq_ignore_ascii_case("a") && modifiers.shift() => {
                 return self.update(Message::ShowAgenda);
             }
@@ -1102,6 +1369,11 @@ impl App {
             f.selected = Selected::Heading(i);
             f.refresh_blocks();
             f.fill_inputs();
+        }
+        if let Some(path) = &plan.diagram {
+            // Captured once the diagram arrives.
+            self.image_action(path.clone());
+            return Task::none();
         }
         let focus = if plan.capture {
             self.open_capture()
@@ -1166,6 +1438,24 @@ impl App {
     fn body(&self) -> Element<'_, Message> {
         let main: Element<'_, Message> = if self.root.is_none() {
             self.welcome()
+        } else if let Some(d) = &self.diagram {
+            row![
+                container(self.sidebar())
+                    .width(240)
+                    .height(Fill)
+                    .style(style::pane),
+                rule::vertical(1),
+                container(draw::view(
+                    d,
+                    Message::Diagram,
+                    Message::DiagramSave,
+                    Message::DiagramCancel
+                ))
+                .width(Fill)
+                .height(Fill),
+            ]
+            .height(Fill)
+            .into()
         } else if let Some(panel) = self.panel() {
             row![
                 container(self.sidebar())
@@ -1482,6 +1772,7 @@ impl App {
         let actions = Actions {
             link: Message::Link,
             check: Message::ToggleCheckbox,
+            image: Message::ImageAction,
         };
         let edit_button = button(text("Edit").size(13))
             .on_press(Message::StartEditing)
@@ -1490,24 +1781,7 @@ impl App {
         match (f.selected, heading) {
             (Selected::Heading(i), Some(h)) => {
                 let title = f.titles.get(i).map_or(&[][..], Vec::as_slice);
-                let small = |label: &'static str, msg: Message| {
-                    button(text(label).size(13))
-                        .on_press(msg)
-                        .padding([3, 8])
-                        .style(button::text)
-                };
-                parts.push(
-                    row![
-                        history_buttons(f),
-                        space::horizontal().width(Fill),
-                        small("Refile…", Message::StartRefile),
-                        small("Archive", Message::Archive),
-                        edit_button
-                    ]
-                    .spacing(6)
-                    .align_y(iced::Center)
-                    .into(),
-                );
+                parts.push(heading_toolbar(f, edit_button));
                 parts.push(read::sized(title, 24, ink, Message::Link));
                 parts.push(self.metadata(h, doc));
                 let chips = reader_chips(h, doc, self.today);
@@ -1550,7 +1824,7 @@ impl App {
                 .into(),
             );
         } else {
-            parts.push(read::blocks(&f.blocks, ink, actions));
+            parts.push(read::blocks(&f.blocks, ink, actions, &f.pictures));
         }
         scrollable(
             Column::with_children(parts)
@@ -1726,6 +2000,30 @@ impl App {
     }
 }
 
+/// The read view's buttons for a heading.
+fn heading_toolbar<'a>(
+    f: &OpenFile,
+    edit: iced::widget::Button<'a, Message>,
+) -> Element<'a, Message> {
+    let small = |label: &'static str, msg: Message| {
+        button(text(label).size(13))
+            .on_press(msg)
+            .padding([3, 8])
+            .style(button::text)
+    };
+    row![
+        history_buttons(f),
+        space::horizontal().width(Fill),
+        small("Diagram…", Message::NewDiagram),
+        small("Refile…", Message::StartRefile),
+        small("Archive", Message::Archive),
+        edit
+    ]
+    .spacing(6)
+    .align_y(iced::Center)
+    .into()
+}
+
 /// Undo and Redo, enabled when there is a step.
 fn history_buttons(f: &OpenFile) -> Element<'static, Message> {
     let (undo, redo) = f.history();
@@ -1802,6 +2100,33 @@ fn parse_when(input: &str, today: NaiveDate) -> Result<Option<Timestamp>, ()> {
         return Err(());
     }
     Ok(Some(ts))
+}
+
+/// Whether a link path is an SVG.
+fn is_svg(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz"))
+}
+
+/// Reads an image from the clipboard (off the UI thread) as PNG bytes.
+fn paste() -> Task<Message> {
+    Task::perform(async { clipboard_png() }, |png| {
+        Message::Pasted(png.map(Arc::new))
+    })
+}
+
+/// The clipboard's image encoded as PNG, or `None` (no image, or no
+/// clipboard).
+fn clipboard_png() -> Option<Vec<u8>> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let img = clipboard.get_image().ok()?;
+    let width = u32::try_from(img.width).ok()?;
+    let height = u32::try_from(img.height).ok()?;
+    let rgba = image::RgbaImage::from_raw(width, height, img.bytes.into_owned())?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    rgba.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some(out.into_inner())
 }
 
 /// Waits for the window to settle, then captures it.
@@ -2104,9 +2429,9 @@ mod tests {
         assert_eq!(p.entry(), "* TODO x");
         assert!(p.edited);
         let _ = a.update(Message::CaptureSave);
-        assert!(a.capture_sent);
+        assert_eq!(a.awaiting, Awaiting::Capture);
         let _ = a.update(Message::Worker(Event::Error("disk full".into())));
-        assert!(a.capture.is_some() && !a.capture_sent);
+        assert!(a.capture.is_some() && a.awaiting == Awaiting::Nothing);
         let _ = a.update(Message::CaptureCancel);
         assert!(a.capture.is_none());
     }
@@ -2139,6 +2464,88 @@ mod tests {
         assert_eq!(a.refile.as_ref().unwrap().matches(), [3]);
         let _ = a.update(Message::RefilePick(3));
         assert!(a.refile.is_none());
+    }
+
+    #[test]
+    fn images_load_once_and_attachments_are_linked() {
+        let mut a = loaded("* one\n[[file:pic.png]]\n* two\n");
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        // Without a worker nothing is requested, so mark it as a worker would.
+        let f = a.file.as_mut().unwrap();
+        assert_eq!(read::image_paths(&f.blocks), ["pic.png"]);
+        let _ = a.update(Message::Worker(Event::Image {
+            file: "a.org".into(),
+            path: "pic.png".into(),
+            data: None,
+        }));
+        assert!(matches!(
+            a.file.as_ref().unwrap().pictures.get("pic.png"),
+            Some(Picture::Missing)
+        ));
+        // Attached while reading: linked at the end of the selected heading.
+        let _ = a.update(Message::Worker(Event::Attached {
+            file: "a.org".into(),
+            link: "attachments/a/x.png".into(),
+        }));
+        assert_eq!(
+            text_of(&a),
+            "* one\n[[file:pic.png]]\n[[file:attachments/a/x.png]]\n* two\n"
+        );
+        // While editing: at the cursor.
+        let _ = a.update(Message::Select(Selected::Heading(1)));
+        let _ = a.update(Message::StartEditing);
+        let _ = a.update(Message::EditorAction(Action::Move(Motion::DocumentEnd)));
+        let _ = a.update(Message::Worker(Event::Attached {
+            file: "a.org".into(),
+            link: "y.png".into(),
+        }));
+        assert!(
+            text_of(&a).ends_with("* two\n[[file:y.png]]"),
+            "{}",
+            text_of(&a)
+        );
+        // Another file: not linked, reported.
+        let _ = a.update(Message::Worker(Event::Attached {
+            file: "b.org".into(),
+            link: "z.png".into(),
+        }));
+        assert!(a.status.as_deref().unwrap().contains("isn't linked"));
+    }
+
+    #[test]
+    fn diagram_editor_opens_saves_and_closes() {
+        let mut a = loaded("* one\n");
+        let _ = a.update(Message::NewDiagram);
+        assert!(a.diagram.as_ref().is_some_and(|d| d.link.is_none()));
+        let rect = crate::diagram::Shape::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 5.0,
+            h: 5.0,
+            color: "#000000".into(),
+            width: 1.0,
+        };
+        let _ = a.update(Message::Diagram(draw::Edit::Add(rect)));
+        // Cancel with changes asks once.
+        let _ = a.update(Message::DiagramCancel);
+        assert!(a.diagram.is_some());
+        let _ = a.update(Message::DiagramSave);
+        // No worker in this test: pretend it answered.
+        a.awaiting = Awaiting::Diagram;
+        let _ = a.update(Message::Worker(Event::Attached {
+            file: "a.org".into(),
+            link: "attachments/a/d.svg".into(),
+        }));
+        assert!(a.diagram.is_none());
+        assert!(text_of(&a).contains("[[file:attachments/a/d.svg]]"));
+        let _ = a.update(Message::Worker(Event::Diagram {
+            file: "a.org".into(),
+            path: "attachments/a/d.svg".into(),
+            shapes: vec![],
+        }));
+        assert!(a.diagram.as_ref().is_some_and(|d| d.link.is_some()));
+        let _ = a.update(Message::DiagramCancel);
+        assert!(a.diagram.is_none());
     }
 
     #[test]

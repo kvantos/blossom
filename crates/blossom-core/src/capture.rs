@@ -459,14 +459,7 @@ impl Document {
                     let at = if *first {
                         h.spans.body.start
                     } else {
-                        let body = &self.text()[h.spans.body.clone()];
-                        let kept = body.trim_end_matches([' ', '\t', '\r', '\n']).len();
-                        let end = h.spans.body.start + kept;
-                        if kept == 0 {
-                            h.spans.body.start
-                        } else {
-                            text::line_at(self.text(), end.saturating_sub(1)).end
-                        }
+                        self.after_content(h.spans.body.clone())
                     };
                     return Ok(self.insert_entry(at, lines));
                 }
@@ -520,6 +513,43 @@ impl Document {
             .iter()
             .position(|h| h.spans.line.start == start)
             .unwrap_or(0)
+    }
+
+    /// The start of the line after the last non-blank line in `range`, or
+    /// `range.start` when it is all blank.
+    fn after_content(&self, range: std::ops::Range<usize>) -> usize {
+        let kept = self.text()[range.clone()]
+            .trim_end_matches([' ', '\t', '\r', '\n'])
+            .len();
+        if kept == 0 {
+            range.start
+        } else {
+            text::line_at(self.text(), range.start + kept - 1).end
+        }
+    }
+
+    /// Adds `line` as a line of its own at the end of heading `index`'s own
+    /// text (after its last non-blank line, above its children), or of the
+    /// text before the first heading when `index` is `None`. Returns where
+    /// the line starts.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NoSuchHeading`], or [`EditError::MultilineText`].
+    pub fn append_line(&mut self, index: Option<usize>, line: &str) -> Result<usize, EditError> {
+        if line.contains(['\n', '\r']) {
+            return Err(EditError::MultilineText);
+        }
+        let range = match index {
+            Some(i) => {
+                let h = self.heading(i).ok_or(EditError::NoSuchHeading(i))?;
+                // The metadata (planning, drawers) stays above the line.
+                h.spans.body.start..h.spans.section_end
+            }
+            None => self.preamble().range.clone(),
+        };
+        let at = self.after_content(range);
+        Ok(self.insert_lines(at, &[line.to_string()]))
     }
 
     /// Inserts `lines` at byte `at` (a line start or the end); returns
@@ -638,6 +668,28 @@ mod tests {
             Err(CaptureError::NoHeading(_))
         ));
         assert_eq!(d.text(), text);
+    }
+
+    #[test]
+    fn append_lines() {
+        let mut d = Document::parse(
+            "#+TITLE: t\n\n* a\nSCHEDULED: <2026-11-23 Mon>\nbody\n\n** child\n* b",
+            crate::Keywords::default(),
+        );
+        d.append_line(Some(0), "[[file:x.png]]").unwrap();
+        d.append_line(Some(2), "[[file:y.png]]").unwrap();
+        d.append_line(None, "top").unwrap();
+        assert_eq!(
+            d.text(),
+            "#+TITLE: t\ntop\n\n* a\nSCHEDULED: <2026-11-23 Mon>\nbody\n[[file:x.png]]\n\n** child\n* b\n[[file:y.png]]"
+        );
+        let mut e = Document::parse("* h\n", crate::Keywords::default());
+        e.append_line(Some(0), "x").unwrap();
+        assert_eq!(e.text(), "* h\nx\n");
+        assert_eq!(
+            e.append_line(Some(5), "x"),
+            Err(EditError::NoSuchHeading(5))
+        );
     }
 
     #[test]

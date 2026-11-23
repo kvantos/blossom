@@ -225,3 +225,27 @@ pub fn notice(theme: &Theme) -> container::Style {
         ..container::Style::default()
     }
 }
+
+/// The border around the diagram canvas.
+pub fn canvas_frame(theme: &Theme) -> container::Style {
+    container::Style {
+        border: Border {
+            radius: 4.0.into(),
+            width: 1.0,
+            color: theme.extended_palette().background.strong.color,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The frame around an inline image.
+pub fn picture(theme: &Theme) -> container::Style {
+    container::Style {
+        border: Border {
+            radius: 4.0.into(),
+            width: 1.0,
+            color: theme.extended_palette().background.weak.color,
+        },
+        ..container::Style::default()
+    }
+}

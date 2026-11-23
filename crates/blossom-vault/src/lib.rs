@@ -7,6 +7,7 @@
 //! stale-write guard, so a change made by another program (Emacs, Syncthing,
 //! git) is never silently overwritten. Paths are vault-relative with `/`.
 
+pub mod attach;
 pub mod config;
 mod conflict;
 mod ignore;
@@ -356,6 +357,20 @@ impl Vault {
         text: &str,
         expected: Option<Revision>,
     ) -> Result<Revision, WriteError> {
+        self.write_bytes(path, text.as_bytes(), expected)
+    }
+
+    /// [`Vault::write`] for any bytes (attachments, diagrams).
+    ///
+    /// # Errors
+    ///
+    /// As [`Vault::write`].
+    pub fn write_bytes(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        expected: Option<Revision>,
+    ) -> Result<Revision, WriteError> {
         let full = self
             .full_path(path)
             .map_err(|_| WriteError::InvalidPath(path.to_string()))?;
@@ -366,7 +381,7 @@ impl Vault {
         let dir = full.parent().unwrap_or(&self.root).to_path_buf();
         fs::create_dir_all(&dir)?;
         let tmp = temp_path(&full);
-        let result = write_and_rename(&tmp, &full, text.as_bytes());
+        let result = write_and_rename(&tmp, &full, bytes);
         if result.is_err() {
             let _ = fs::remove_file(&tmp);
         }

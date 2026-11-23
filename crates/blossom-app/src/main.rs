@@ -5,6 +5,8 @@
 
 mod agenda;
 mod app;
+mod diagram;
+mod draw;
 mod editor;
 mod file;
 mod outline;

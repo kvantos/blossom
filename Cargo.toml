@@ -21,10 +21,12 @@ orgize = { path = "crates/orgize" }
 blossom-core = { path = "crates/blossom-core" }
 blossom-vault = { path = "crates/blossom-vault" }
 blossom-index = { path = "crates/blossom-index" }
+arboard = { version = "3.7", default-features = false, features = ["image-data", "wayland-data-control"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4.6", features = ["derive"] }
 directories = "6"
-iced = { version = "0.14", features = ["advanced"] }
+iced = { version = "0.14", features = ["advanced", "canvas", "image", "svg"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 notify = "9"
 proptest = "1"
 rfd = "0.18"
