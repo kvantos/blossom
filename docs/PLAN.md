@@ -71,14 +71,25 @@ Notes from Phase 1:
 - Dates use the `chrono` crate (pure; `now` is always passed in).
 - Departures from Bloom: `Keywords` without `|` makes the last keyword done-type (Emacs rule); timestamps are written with English day names regardless of locale (any day name is read).
 - `Document::org()` exposes the orgize tree read-only, for tests and later rendering; revisit when Phase 3 decides what the GUI needs.
-- Agenda occurrence logic (`occurrenceCovering`, warning days) is left for Phase 5.
+- Agenda occurrence logic (`occurrenceCovering`) was added in Phase 2; warning days are left for Phase 5.
 
 ## Phase 2: `blossom-vault` + `blossom-index` + `blsm`
-- [ ] Vault: recursive `.org` walk (skip dot-folders, `.stversions`), ignore file (`.orgzlyignore`/`.blsmignore`), `mtime:size` revisions, parse cache, atomic writes preserving CRLF, stale-write guard, `.sync-conflict-*` detection, debounced notify watcher.
-- [ ] Index: tantivy per-heading schema; incremental by revision; in the platform cache dir; rebuildable.
-- [ ] Query language from Bloom `docs/search-syntax.md`.
-- [ ] `blsm search|agenda|capture|todo|index --rebuild|ls`, `--json`, config `~/.config/blossom/config.toml`.
-- [ ] CI on Linux and macOS.
+- [x] Vault: recursive `.org` walk (skip dot-folders, `.stversions`), ignore file (`.orgzlyignore`/`.blsmignore`), `mtime:size` revisions, parse cache, atomic writes preserving CRLF, stale-write guard, `.sync-conflict-*` detection, debounced notify watcher.
+- [x] Index: tantivy per-heading schema; incremental by revision; in the platform cache dir; rebuildable.
+- [x] Query language from Bloom `docs/search-syntax.md`.
+- [x] `blsm search|agenda|capture|todo|index --rebuild|ls`, `--json`, config `~/.config/blossom/config.toml`.
+- [x] CI on Linux and macOS. *(`.github/workflows/ci.yml`; not run yet: the repo has no remote.)*
+
+Notes from Phase 2:
+- The index only narrows: plain-text terms of 3+ characters are looked up as lower-cased trigrams, then Bloom's matcher (`blossom-index/src/matcher.rs`) decides every result. `tests/index.rs` checks narrowed search equals a full scan on all fixtures.
+- The index folder holds a meta file (schema version + keyword settings); any mismatch deletes and rebuilds it.
+- Watcher batches are hints to re-list, not exact: a file created inside a brand-new folder may be reported as the folder (inotify race).
+- Symlinked folders are not followed (no cycles); symlinked files are.
+- `b.NAME` also matches a nested file by its name (`b.home` finds `home/home.org`); Bloom compares the full path only.
+- Departures/omissions vs Bloom search: no file-name result rows, no snippets, no intro note, no saved searches (GUI concerns).
+- `blsm capture` is a plain "heading at the end of the inbox"; templates come in Phase 5. `blsm agenda` is the `ad.N` view (minus done items unless `--all`); Phase 5 adds Bloom's full agenda rules (repeats ahead for SCHEDULED/DEADLINE, due soon).
+- Occurrence logic (`Timestamp::occurrence_covering`, `occurs_between`) moved into core now, as `ad.N` needs it.
+- New dependencies: tantivy 0.27, notify 9, clap 4, serde/serde_json, toml 1, directories 6; tempfile for tests.
 
 ## Phase 3: `blossom-app` shell (iced)
 - [ ] Notebooks tree, outline with chips, read view.

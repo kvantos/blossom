@@ -301,6 +301,88 @@ impl Timestamp {
     }
 }
 
+/// Which days a timestamp falls on, for the agenda (Bloom's `RepeatOccurrence`
+/// and `occurrenceCovering`, after Emacs's agenda).
+impl Timestamp {
+    /// The start date of this timestamp's occurrence that covers `day`, or
+    /// `None` when none does. A plain stamp covers its own date (through
+    /// `range_end` for a range). A repeating one also covers every later
+    /// occurrence projected from `date`; `+`, `++` and `.+` project alike.
+    /// A range repeats as a block of the same length.
+    #[must_use]
+    pub fn occurrence_covering(&self, day: NaiveDate) -> Option<NaiveDate> {
+        if day < self.date {
+            return None;
+        }
+        let span = self
+            .range_end
+            .map_or(0, |e| (e - self.date).num_days().max(0));
+        let covers = |start: NaiveDate| (day - start).num_days() <= span;
+        let Some(rep) = self.repeater.filter(|r| r.value > 0) else {
+            return covers(self.date).then_some(self.date);
+        };
+        if rep.unit == TimeUnit::Hour {
+            return self.hour_occurrence_on(rep.value, day);
+        }
+        let step = i64::from(rep.value);
+        let distance = match rep.unit {
+            TimeUnit::Day => (day - self.date).num_days(),
+            TimeUnit::Week => (day - self.date).num_days() / 7,
+            TimeUnit::Month => months_between(self.date, day),
+            TimeUnit::Year => i64::from(day.year() - self.date.year()),
+            TimeUnit::Hour => 0,
+        };
+        // The last occurrence starting on or before `day`: estimate, then walk
+        // down (an overflowed month end can put the estimate one step high).
+        let mut n = distance / step + 1;
+        while n >= 0 {
+            let units = u32::try_from(n * step).ok()?;
+            let start = add_units(self.date, units, rep.unit)?;
+            if start <= day {
+                return covers(start).then_some(start);
+            }
+            n -= 1;
+        }
+        None
+    }
+
+    /// Whether any occurrence touches a day in `from..=to`.
+    #[must_use]
+    pub fn occurs_between(&self, from: NaiveDate, to: NaiveDate) -> bool {
+        if !self.repeats() {
+            return self.date <= to && self.range_end.unwrap_or(self.date) >= from;
+        }
+        let mut day = from.max(self.date);
+        while day <= to {
+            if self.occurrence_covering(day).is_some() {
+                return true;
+            }
+            let Some(next) = day.succ_opt() else { break };
+            day = next;
+        }
+        false
+    }
+
+    /// An hour repeater lands on `day` when one of its starts
+    /// `date time + k * hours` falls on it (Emacs's `org-closest-date`).
+    fn hour_occurrence_on(&self, hours: u32, day: NaiveDate) -> Option<NaiveDate> {
+        let start = self.date.and_time(self.time.unwrap_or(NaiveTime::MIN));
+        let day_start = day.and_time(NaiveTime::MIN);
+        if day_start <= start {
+            return (day == self.date).then_some(day);
+        }
+        let step = i64::from(hours) * 60;
+        let k = ((day_start - start).num_minutes() + step - 1) / step;
+        let at = start.checked_add_signed(TimeDelta::try_minutes(k * step)?)?;
+        (at.date() == day).then_some(day)
+    }
+}
+
+/// Whole calendar months from `a`'s month to `b`'s.
+fn months_between(a: NaiveDate, b: NaiveDate) -> i64 {
+    i64::from(b.year() - a.year()) * 12 + i64::from(b.month()) - i64::from(a.month())
+}
+
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.format())
@@ -770,6 +852,49 @@ mod tests {
         // No time: nothing to shift.
         let no_time = ts("<2026-11-22 Sun +3h>");
         assert_eq!(no_time.advance(now), no_time);
+    }
+
+    #[test]
+    fn occurrences() {
+        let plain = ts("<2026-11-20 Fri>");
+        assert_eq!(
+            plain.occurrence_covering(d(2026, 11, 20)),
+            Some(d(2026, 11, 20))
+        );
+        assert_eq!(plain.occurrence_covering(d(2026, 11, 21)), None);
+        let range = ts("<2026-11-20 Fri>--<2026-11-22 Sun>");
+        assert_eq!(
+            range.occurrence_covering(d(2026, 11, 22)),
+            Some(d(2026, 11, 20))
+        );
+        assert_eq!(range.occurrence_covering(d(2026, 11, 23)), None);
+        let weekly = ts("<2026-11-20 Fri +1w>");
+        assert_eq!(
+            weekly.occurrence_covering(d(2026, 12, 4)),
+            Some(d(2026, 12, 4))
+        );
+        assert_eq!(weekly.occurrence_covering(d(2026, 12, 5)), None);
+        assert_eq!(
+            weekly.occurrence_covering(d(2026, 11, 13)),
+            None,
+            "never before its date"
+        );
+        // Month-end overflow: Jan 31 + 1m lands on Mar 3.
+        let monthly = ts("<2026-01-31 Sat +1m>");
+        assert_eq!(
+            monthly.occurrence_covering(d(2026, 3, 3)),
+            Some(d(2026, 3, 3))
+        );
+        assert_eq!(monthly.occurrence_covering(d(2026, 2, 28)), None);
+        let hourly = ts("<2026-11-20 Fri 22:00 +36h>");
+        assert_eq!(
+            hourly.occurrence_covering(d(2026, 11, 22)),
+            Some(d(2026, 11, 22))
+        );
+        assert_eq!(hourly.occurrence_covering(d(2026, 11, 21)), None);
+        assert!(weekly.occurs_between(d(2026, 11, 26), d(2026, 11, 27)));
+        assert!(!weekly.occurs_between(d(2026, 11, 21), d(2026, 11, 26)));
+        assert!(range.occurs_between(d(2026, 11, 22), d(2026, 11, 30)));
     }
 
     #[test]

@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/orgize", "crates/blossom-core"]
+members = [
+    "crates/orgize",
+    "crates/blossom-core",
+    "crates/blossom-vault",
+    "crates/blossom-index",
+    "crates/blsm",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,8 +16,19 @@ publish = false
 
 [workspace.dependencies]
 orgize = { path = "crates/orgize" }
+blossom-core = { path = "crates/blossom-core" }
+blossom-vault = { path = "crates/blossom-vault" }
+blossom-index = { path = "crates/blossom-index" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+clap = { version = "4.6", features = ["derive"] }
+directories = "6"
+notify = "9"
 proptest = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tantivy = "0.27"
+tempfile = "3"
+toml = "1"
 
 # Strict lints for our own crates. The vendored orgize fork does not opt in.
 [workspace.lints.rust]

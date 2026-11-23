@@ -1,0 +1,17 @@
+[package]
+name = "blossom-vault"
+description = "Folder access for Blossom: listing, ignore rules, revisions, atomic writes, watching."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-core.workspace = true
+notify.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

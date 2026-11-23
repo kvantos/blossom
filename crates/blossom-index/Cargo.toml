@@ -1,0 +1,21 @@
+[package]
+name = "blossom-index"
+description = "Search index and query language for Blossom, rebuildable from the vault."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+blossom-core.workspace = true
+blossom-vault.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tantivy.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
