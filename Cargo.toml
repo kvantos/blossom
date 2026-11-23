@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 orgize = { path = "crates/orgize" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 proptest = "1"
 
 # Strict lints for our own crates. The vendored orgize fork does not opt in.

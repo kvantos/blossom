@@ -58,12 +58,20 @@ blossom/
 
 ## Phase 1: `blossom-core`
 Model on Bloom's `OrgParser.kt` / `OrgMutations.kt`, built on orgize's tree.
-- [ ] `Document`: text, flat headings, file tags, preamble `#+KEY:` lines, file property drawer, file id, intro.
-- [ ] `Heading`: index, ranges, level, keyword, priority, title, tags, planning, properties (ordered), logbook, active timestamps, body range; parent/children/subtree/inherited tags.
-- [ ] `Timestamp`: date, times, active, repeater (`+ ++ .+`), warning/delay, range; parse and Emacs-style format.
-- [ ] `Keywords`: parse `"TODO NEXT | DONE CANCELLED"`, `is_done`, `next`.
-- [ ] Edits: set keyword/priority/tags/scheduled/deadline, mark_done (repeater + LOGBOOK), toggle_checkbox, upsert_property, move up/down, promote/demote, delete, refile, insert heading.
-- [ ] Unit tests per edit; lines outside the edited range unchanged.
+- [x] `Document`: text, flat headings, file tags, preamble `#+KEY:` lines, file property drawer, file id, intro.
+- [x] `Heading`: index, ranges, level, keyword, priority, title, tags, planning, properties (ordered), logbook, active timestamps, body range; parent/children/subtree/inherited tags.
+- [x] `Timestamp`: date, times, active, repeater (`+ ++ .+`), warning/delay, range; parse and Emacs-style format.
+- [x] `Keywords`: parse `"TODO NEXT | DONE CANCELLED"`, `is_done`, `next`.
+- [x] Edits: set keyword/priority/tags/scheduled/deadline, mark_done (repeater + LOGBOOK), toggle_checkbox, upsert_property, move up/down, promote/demote, delete, refile, insert heading.
+- [x] Unit tests per edit; lines outside the edited range unchanged. *(`tests/mutations.rs`: exact-output tests, plus a sweep running every edit on every fixture heading, checking the tree and index against a fresh parse and that no byte outside the heading changed.)*
+
+Notes from Phase 1:
+- Heading structure (start, level, keyword, priority, title, tags, subtree end) comes from orgize's tree; the metadata after the heading line uses a line scanner ported from Bloom, which also accepts Bloom's layouts (drawers in either order, a dedicated active-timestamp line above the drawers).
+- Edits splice the smallest range (e.g. only the keyword), not a re-rendered heading line as Bloom does, so Emacs tag alignment survives. New lines use the file's line ending; a file without a final newline keeps it that way.
+- Dates use the `chrono` crate (pure; `now` is always passed in).
+- Departures from Bloom: `Keywords` without `|` makes the last keyword done-type (Emacs rule); timestamps are written with English day names regardless of locale (any day name is read).
+- `Document::org()` exposes the orgize tree read-only, for tests and later rendering; revisit when Phase 3 decides what the GUI needs.
+- Agenda occurrence logic (`occurrenceCovering`, warning days) is left for Phase 5.
 
 ## Phase 2: `blossom-vault` + `blossom-index` + `blsm`
 - [ ] Vault: recursive `.org` walk (skip dot-folders, `.stversions`), ignore file (`.orgzlyignore`/`.blsmignore`), `mtime:size` revisions, parse cache, atomic writes preserving CRLF, stale-write guard, `.sync-conflict-*` detection, debounced notify watcher.
