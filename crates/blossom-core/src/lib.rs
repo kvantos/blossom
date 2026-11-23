@@ -7,6 +7,8 @@
 
 mod document;
 pub mod edit;
+pub mod editing;
+pub mod highlight;
 mod keywords;
 pub mod render;
 mod text;

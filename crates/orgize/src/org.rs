@@ -7,7 +7,7 @@ use crate::export::{HtmlExport, TraversalContext, Traverser};
 use crate::syntax::{OrgLanguage, SyntaxNode};
 use crate::SyntaxElement;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Org {
     pub(crate) green: GreenNode,
     pub(crate) config: ParseConfig,

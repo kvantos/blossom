@@ -30,30 +30,48 @@ impl Ink {
     }
 }
 
-/// The blocks as a column. `on_link` turns a clicked link target into a message.
-pub fn blocks<'a, M: Clone + 'a>(
-    blocks: &'a [Block],
-    ink: Ink,
-    on_link: fn(String) -> M,
-) -> Element<'a, M> {
-    column(blocks.iter().map(|b| block(b, ink, on_link)))
+/// What clicks in the read view produce.
+pub struct Actions<M> {
+    /// A link target was clicked.
+    pub link: fn(String) -> M,
+    /// The checkbox of the item at this byte offset (in the rendered text)
+    /// was clicked.
+    pub check: fn(usize) -> M,
+}
+
+// Function pointers are `Copy` whatever `M` is, which a derive can't see.
+impl<M> Clone for Actions<M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<M> Copy for Actions<M> {}
+
+/// The blocks as a column.
+pub fn blocks<'a, M: Clone + 'a>(blocks: &'a [Block], ink: Ink, on: Actions<M>) -> Element<'a, M> {
+    column(blocks.iter().map(|b| block(b, ink, on)))
         .spacing(10)
         .width(Fill)
         .into()
 }
 
-fn block<'a, M: Clone + 'a>(b: &'a Block, ink: Ink, on_link: fn(String) -> M) -> Element<'a, M> {
+fn block<'a, M: Clone + 'a>(b: &'a Block, ink: Ink, on: Actions<M>) -> Element<'a, M> {
+    let on_link = on.link;
     match b {
         Block::Paragraph(spans) => paragraph(spans, ink, on_link),
         Block::ListItem {
             bullet,
             checkbox: mark,
+            offset,
             children,
-            ..
         } => {
+            let offset = *offset;
             let marker: Element<'a, M> = match mark {
-                // Read-only for now; toggling comes with editing.
-                Some(c) => checkbox(*c == 'X').size(14).into(),
+                Some(c) => checkbox(*c == 'X')
+                    .size(14)
+                    .on_toggle(move |_| (on.check)(offset))
+                    .into(),
                 None => text(if bullet.ends_with(['.', ')']) {
                     bullet.as_str()
                 } else {
@@ -64,7 +82,7 @@ fn block<'a, M: Clone + 'a>(b: &'a Block, ink: Ink, on_link: fn(String) -> M) ->
             };
             row![
                 container(marker).width(22),
-                column(children.iter().map(|c| block(c, ink, on_link)))
+                column(children.iter().map(|c| block(c, ink, on)))
                     .spacing(4)
                     .width(Fill)
             ]
@@ -94,7 +112,7 @@ fn block<'a, M: Clone + 'a>(b: &'a Block, ink: Ink, on_link: fn(String) -> M) ->
                 .into()
         }
         Block::Quote(inner) => {
-            container(column(inner.iter().map(|c| block(c, ink, on_link))).spacing(8))
+            container(column(inner.iter().map(|c| block(c, ink, on))).spacing(8))
                 .padding([8, 14])
                 .width(Fill)
                 .style(style::quote)

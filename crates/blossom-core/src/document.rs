@@ -170,7 +170,8 @@ impl Preamble {
 }
 
 /// A parsed org file. Its text is exactly the input: nothing is re-rendered.
-#[derive(Debug)]
+/// Cloning is cheap apart from copying the text.
+#[derive(Clone, Debug)]
 pub struct Document {
     text: String,
     org: Org,

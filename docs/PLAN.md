@@ -105,9 +105,21 @@ Notes from Phase 3:
 - Dev hook `BLOSSOM_SCREENSHOT=out.png` (+ `_FILE`, `_HEADING`, `BLOSSOM_THEME`) saves a window screenshot and exits, for checking the UI without a screenshot tool.
 
 ## Phase 4: editing
-- [ ] `text_editor` with org highlighter; per-heading section editing.
-- [ ] Metadata panel, list continuation, autosave with stale guard, undo.
-- [ ] Native folder picker (e.g. `rfd`) on the welcome screen and as an "Open vault…" action.
+- [x] `text_editor` with org highlighter; per-heading section editing.
+- [x] Metadata panel, list continuation, autosave with stale guard, undo.
+- [x] Native folder picker (e.g. `rfd`) on the welcome screen and as an "Open vault…" action.
+
+Notes from Phase 4:
+- Section editing: "Edit" (or Ctrl/Cmd+E) opens iced's `text_editor` on the selected heading's own section (heading line, metadata, body; children keep their own sections) or on the top of the file (keywords, file drawer, intro; also how an empty file is started). Every keystroke splices the editor text into the working document (`Document::replace_range`), so the outline updates live; a section that has text after it always keeps its final line break, so the next heading can't join its last line. Esc or Done leaves the editor.
+- Highlighting: `blossom_core::highlight` is a line scanner (state carried line to line: inside a block or a drawer) for headings, keywords, priority, tags, planning, timestamps, drawers, `#+` lines, comments, bullets, checkboxes, emphasis and links; the app adapts it to iced's `Highlighter`.
+- Metadata panel (read and edit view): keyword and priority pickers, tags, SCHEDULED and DEADLINE fields (`2026-11-24`, `2026-11-24 09:30`, `today`, `tomorrow`, `+3d`, `+2w` or an org timestamp; × clears). Keyword changes use `change_keyword`, so DONE sets CLOSED and repeaters advance. Read-view checkboxes now toggle.
+- List continuation (`blossom_core::editing::continue_list`): Enter at the end of a list item starts the next one (same indent and bullet, numbers count up, an empty `[ ]` if the item had a checkbox); Enter on an empty item removes its bullet.
+- Undo/redo (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl+Y, and buttons) per open file, up to 200 steps of whole-text snapshots; keystrokes less than 1 s apart are one step. An outside change clears the history (stepping back would silently revert the other program's edit).
+- Autosave: the UI sends the full text after every change; the worker writes it once typing pauses for 0.7 s, with the vault's stale-write guard, and flushes on close (the window waits for it) and when another vault is opened. A save refused as stale, or an outside change while edits are unsaved, is merged with `blossom_core::editing::merge3` when the two sides changed different lines; otherwise a banner offers "Keep mine" or "Use the disk version" (the dropped edits stay one Undo away). Closing with an unresolved conflict asks once. Unsaved text of a file you moved away from is kept and shown again when you come back.
+- `Document` and the fork's `Org` are now `Clone` (fork patch 6), so edits splice a copy instead of re-parsing.
+- Folder picker: `rfd` 0.18 with its default XDG portal backend (no GTK or other system libraries on Linux). "Choose folder…" on the welcome screen, "Open…" above the notebooks tree, Ctrl/Cmd+O. The typed path stays as a fallback when no portal is running.
+- New dependencies: `rfd`; iced's `advanced` feature (for the `Highlighter` trait).
+- Screenshot hook: `BLOSSOM_SCREENSHOT_EDIT=1` opens the editor first. The GPU renderer's window screenshot leaves the editor's text out, so capture the editor with `ICED_BACKEND=tiny-skia`.
 
 ## Phase 5: agenda, capture, refile, archive
 - [ ] Agenda rules from Bloom (one day per item: scheduled else deadline; bare timestamps are events; due soon; repeats ahead).

@@ -4,6 +4,8 @@
 //! `~/.config/blossom/config.toml`, or a welcome screen to choose one.
 
 mod app;
+mod editor;
+mod file;
 mod outline;
 mod read;
 mod shot;
@@ -56,5 +58,7 @@ fn main() -> iced::Result {
     .theme(App::theme)
     .subscription(App::subscription)
     .window_size((1200.0, 760.0))
+    // Closing first writes pending saves (see `App::close`).
+    .exit_on_close_request(false)
     .run()
 }

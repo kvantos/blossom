@@ -53,7 +53,9 @@ pub enum Chip {
     Overdue,
 }
 
-fn mix(a: Color, b: Color, t: f32) -> Color {
+/// `a` moved toward `b` by `t` (0 to 1).
+#[must_use]
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
     Color {
         r: a.r + (b.r - a.r) * t,
         g: a.g + (b.g - a.g) * t,
@@ -152,5 +154,45 @@ pub fn row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
             },
             ..button::Style::default()
         }
+    }
+}
+
+/// Code text colour in the editor.
+#[must_use]
+pub fn code_ink(theme: &Theme) -> Color {
+    let p = theme.palette();
+    mix(p.text, p.success, 0.55)
+}
+
+/// The section editor: the read pane's background, a thin accent border
+/// when focused.
+pub fn editor(
+    theme: &Theme,
+    status: iced::widget::text_editor::Status,
+) -> iced::widget::text_editor::Style {
+    let p = theme.palette();
+    let mut s = iced::widget::text_editor::default(theme, status);
+    s.background = Background::Color(p.background);
+    s.border = Border {
+        radius: 6.0.into(),
+        width: 1.0,
+        color: match status {
+            iced::widget::text_editor::Status::Focused { .. } => p.primary,
+            _ => mix(p.text, p.background, 0.8),
+        },
+    };
+    s
+}
+
+/// The banner for a save conflict.
+pub fn banner(theme: &Theme) -> container::Style {
+    let p = theme.palette();
+    container::Style {
+        background: Some(Background::Color(mix(p.background, p.danger, 0.12))),
+        border: Border {
+            radius: 6.0.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
     }
 }

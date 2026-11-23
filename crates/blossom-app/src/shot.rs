@@ -1,6 +1,7 @@
 //! Developer hook: `BLOSSOM_SCREENSHOT=out.png blossom VAULT` loads the first
 //! file (or `BLOSSOM_SCREENSHOT_FILE`), selects heading
-//! `BLOSSOM_SCREENSHOT_HEADING` if given, saves a screenshot of the window as
+//! `BLOSSOM_SCREENSHOT_HEADING` if given (opening its editor when
+//! `BLOSSOM_SCREENSHOT_EDIT` is set), saves a screenshot of the window as
 //! PNG and exits. `BLOSSOM_THEME=dark|light` overrides the system mode. Used
 //! to check the UI without a screenshot tool; not part of normal use.
 
@@ -18,6 +19,8 @@ pub struct Plan {
     pub heading: Option<usize>,
     /// A forced light/dark mode.
     pub mode: Option<iced::theme::Mode>,
+    /// Open the section editor before capturing.
+    pub edit: bool,
 }
 
 impl Plan {
@@ -36,6 +39,7 @@ impl Plan {
                 Some("light") => Some(iced::theme::Mode::Light),
                 _ => None,
             },
+            edit: std::env::var_os("BLOSSOM_SCREENSHOT_EDIT").is_some(),
         })
     }
 }

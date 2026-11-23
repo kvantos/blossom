@@ -1,28 +1,46 @@
 //! The application: state, messages, update and view.
 //!
 //! Three panes: the notebooks tree, the outline of the selected file, and the
-//! read view of the selected heading (or the file's intro). All file access
-//! happens in the [`worker`]; this module only holds what is on screen.
+//! read view of the selected heading (or the file's top). The read view turns
+//! into a section editor on demand. All file access happens in the
+//! [`worker`]; this module holds what is on screen and the unsaved text.
+//!
+//! Every local change goes through [`OpenFile::change`] (undo) and
+//! [`App::save_open`] (autosave). Disk versions arrive as worker events and
+//! go through [`App::on_disk`], which adopts, merges or reports a conflict.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use blossom_core::render::{self, Block, Span};
-use blossom_core::{Document, Heading, Timestamp};
-use chrono::{Datelike, NaiveDate};
+use blossom_core::editing::{self, ListContinue};
+use blossom_core::render::Span;
+use blossom_core::{Document, EditError, Heading, PlanningKind, Timestamp};
+use blossom_vault::Revision;
+use chrono::{Datelike, NaiveDate, NaiveTime};
+use iced::keyboard::{self, Key};
 use iced::theme::Mode;
+use iced::widget::text_editor::{Action, Edit, Motion};
 use iced::widget::{
-    Column, button, column, container, row, rule, scrollable, space, text, text_input,
+    Column, button, column, container, pick_list, row, rule, scrollable, space, text, text_editor,
+    text_input,
 };
-use iced::{Element, Fill, Font, Length, Subscription, Task, Theme, font};
+use iced::{Element, Fill, Font, Length, Subscription, Task, Theme, font, window};
 
+use crate::editor::{self, Command};
+use crate::file::{DiskCopy, DiskState, Group, OpenFile, SectionEditor, Selected};
 use crate::outline;
-use crate::read::{self, Ink};
+use crate::read::{self, Actions, Ink};
 use crate::shot;
 use crate::style::{self, Chip};
 use crate::tree::{self, FileInfo};
 use crate::worker::{self, Event, Handle, OpenVault, Request};
+
+/// The section editor's widget id, for focusing it.
+const EDITOR_ID: &str = "section-editor";
+
+/// Shown in the keyword and priority pickers for "none".
+const NONE: &str = "—";
 
 /// The app.
 pub struct App {
@@ -30,41 +48,23 @@ pub struct App {
     worker: Option<Handle>,
     /// A vault to open as soon as the worker is ready.
     pending: Option<OpenVault>,
-    /// Used to open a typed-in folder.
+    /// Used to open a typed-in or picked folder.
     template: OpenVault,
     vault_input: String,
     root: Option<PathBuf>,
     files: Arc<Vec<FileInfo>>,
     collapsed_folders: HashSet<String>,
     file: Option<OpenFile>,
+    /// Disk state of files with unsaved or conflicting edits, and of the open file.
+    disk: HashMap<String, DiskState>,
     status: Option<String>,
+    /// Closing: waiting for the worker to write pending saves.
+    closing: bool,
+    /// A close was refused once because of an unresolved conflict.
+    close_warned: bool,
     today: NaiveDate,
     /// The screenshot developer hook, when on.
     shot: Option<shot::Plan>,
-}
-
-/// The file shown in the outline.
-struct OpenFile {
-    path: String,
-    doc: Option<Arc<Document>>,
-    /// Rendered heading titles, by heading index.
-    titles: Vec<Vec<Span>>,
-    folded: HashSet<usize>,
-    selected: Selected,
-    /// The read view of `selected`.
-    blocks: Vec<Block>,
-    missing: bool,
-}
-
-/// What the read view shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Selected {
-    /// Nothing yet.
-    Nothing,
-    /// The file's intro.
-    Intro,
-    /// A heading.
-    Heading(usize),
 }
 
 /// Everything that can happen.
@@ -78,6 +78,10 @@ pub enum Message {
     VaultInput(String),
     /// Open the typed folder.
     OpenTyped,
+    /// Show the system folder picker.
+    PickFolder,
+    /// The folder picker closed.
+    Picked(Option<PathBuf>),
     /// Fold or unfold a folder in the tree.
     ToggleFolder(String),
     /// Show a file's outline.
@@ -88,10 +92,53 @@ pub enum Message {
     Select(Selected),
     /// A link was clicked.
     Link(String),
+    /// A checkbox in the read view, at this offset of the rendered text.
+    ToggleCheckbox(usize),
+    /// Open the section editor on the selection.
+    StartEditing,
+    /// Close the section editor.
+    StopEditing,
+    /// The editor's cursor, selection or text.
+    EditorAction(Action),
+    /// One of the editor's own keys.
+    EditorCommand(Command),
+    /// Undo the last change.
+    Undo,
+    /// Redo.
+    Redo,
+    /// Metadata panel: TODO keyword.
+    SetKeyword(String),
+    /// Metadata panel: priority.
+    SetPriority(String),
+    /// Metadata panel: a text field changed.
+    Input(Field, String),
+    /// Metadata panel: apply a text field.
+    Apply(Field),
+    /// Metadata panel: clear a date.
+    ClearDate(PlanningKind),
+    /// Conflict: overwrite the disk version with the unsaved edits.
+    KeepMine,
+    /// Conflict: drop the unsaved edits (they stay in undo).
+    UseDisk,
+    /// A key nothing else handled.
+    Key(keyboard::Event),
+    /// The window's close button.
+    CloseRequested,
     /// Hide the status line.
     DismissStatus,
     /// The screenshot hook's capture.
     Shot(iced::window::Screenshot),
+}
+
+/// A metadata panel text field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    /// Tags.
+    Tags,
+    /// SCHEDULED.
+    Scheduled,
+    /// DEADLINE.
+    Deadline,
 }
 
 impl App {
@@ -115,7 +162,10 @@ impl App {
             files: Arc::new(Vec::new()),
             collapsed_folders: HashSet::new(),
             file: None,
+            disk: HashMap::new(),
             status: None,
+            closing: false,
+            close_warned: false,
             today,
             shot,
         };
@@ -144,11 +194,13 @@ impl App {
         (self.mode != Mode::None).then(|| style::theme(self.mode))
     }
 
-    /// The worker and system theme changes.
+    /// The worker, system theme changes, keys and close requests.
     pub fn subscription(_: &Self) -> Subscription<Message> {
         Subscription::batch([
             worker::subscription().map(Message::Worker),
             iced::system::theme_changes().map(Message::Mode),
+            keyboard::listen().map(Message::Key),
+            window::close_requests().map(|_| Message::CloseRequested),
         ])
     }
 
@@ -165,13 +217,24 @@ impl App {
             Message::OpenTyped => {
                 let path = self.vault_input.trim();
                 if !path.is_empty() {
-                    let open = OpenVault {
-                        root: blossom_vault::config::expand(path),
-                        ..self.template.clone()
-                    };
-                    self.request_open(open);
+                    let root = blossom_vault::config::expand(path);
+                    self.open_folder(root);
                 }
             }
+            Message::PickFolder => {
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Open a folder of .org files")
+                            .pick_folder()
+                            .await
+                            .map(|h| h.path().to_path_buf())
+                    },
+                    Message::Picked,
+                );
+            }
+            Message::Picked(Some(root)) => self.open_folder(root),
+            Message::Picked(None) => {}
             Message::ToggleFolder(path) => {
                 if !self.collapsed_folders.remove(&path) {
                     self.collapsed_folders.insert(path);
@@ -187,11 +250,49 @@ impl App {
             }
             Message::Select(sel) => {
                 if let Some(f) = &mut self.file {
+                    f.editor = None;
                     f.selected = sel;
                     f.refresh_blocks();
+                    f.fill_inputs();
                 }
             }
             Message::Link(target) => self.follow_link(&target),
+            Message::ToggleCheckbox(offset) => {
+                let base = self.file.as_ref().and_then(OpenFile::blocks_base);
+                if let Some(base) = base {
+                    self.edit_doc(|d| d.toggle_checkbox(base + offset));
+                }
+            }
+            Message::StartEditing => return self.start_editing(),
+            Message::StopEditing | Message::EditorCommand(Command::Done) => self.stop_editing(),
+            Message::EditorAction(action) => self.editor_action(action),
+            Message::EditorCommand(Command::Enter) => self.enter(),
+            Message::EditorCommand(Command::Undo) | Message::Undo => self.undo(false),
+            Message::EditorCommand(Command::Redo) | Message::Redo => self.undo(true),
+            Message::SetKeyword(k) => {
+                let now = chrono::Local::now().naive_local();
+                let k = (k != NONE).then_some(k);
+                self.edit_heading(|d, i| d.change_keyword(i, k.as_deref(), now));
+            }
+            Message::SetPriority(p) => {
+                let p = (p != NONE).then_some(p);
+                self.edit_heading(|d, i| d.set_priority(i, p.as_deref()));
+            }
+            Message::Input(field, value) => {
+                if let Some(f) = &mut self.file {
+                    *match field {
+                        Field::Tags => &mut f.inputs.tags,
+                        Field::Scheduled => &mut f.inputs.scheduled,
+                        Field::Deadline => &mut f.inputs.deadline,
+                    } = value;
+                }
+            }
+            Message::Apply(field) => self.apply_field(field),
+            Message::ClearDate(kind) => self.set_date(kind, None),
+            Message::KeepMine => self.keep_mine(),
+            Message::UseDisk => self.use_disk(),
+            Message::Key(event) => return self.on_key(&event),
+            Message::CloseRequested => return self.close(),
             Message::DismissStatus => self.status = None,
             Message::Shot(shot) => {
                 if let Some(plan) = &self.shot
@@ -206,7 +307,12 @@ impl App {
         Task::none()
     }
 
-    fn request_open(&mut self, open: OpenVault) {
+    fn open_folder(&mut self, root: PathBuf) {
+        self.vault_input = root.display().to_string();
+        let open = OpenVault {
+            root,
+            ..self.template.clone()
+        };
         match &self.worker {
             Some(w) => w.send(Request::Open(open)),
             None => self.pending = Some(open),
@@ -220,15 +326,7 @@ impl App {
         if let Some(w) = &self.worker {
             w.send(Request::Load(path.clone()));
         }
-        self.file = Some(OpenFile {
-            path,
-            doc: None,
-            titles: Vec::new(),
-            folded: HashSet::new(),
-            selected: Selected::Nothing,
-            blocks: Vec::new(),
-            missing: false,
-        });
+        self.file = Some(OpenFile::loading(path));
     }
 
     fn on_worker(&mut self, event: Event) -> Task<Message> {
@@ -243,6 +341,7 @@ impl App {
                 self.vault_input = root.display().to_string();
                 self.root = Some(root);
                 self.file = None;
+                self.disk.clear();
                 self.collapsed_folders.clear();
                 self.status = None;
             }
@@ -258,26 +357,434 @@ impl App {
                     self.select_file(path);
                 }
             }
-            Event::Document(path, doc) => {
-                if let Some(f) = self.file.as_mut().filter(|f| f.path == path) {
-                    f.set_document(doc);
-                    if let Some(plan) = &self.shot {
-                        if let Some(i) = plan.heading {
-                            f.selected = Selected::Heading(i);
-                            f.refresh_blocks();
-                        }
-                        return capture();
+            Event::Document(path, doc, rev) => {
+                let was_loading = self
+                    .file
+                    .as_ref()
+                    .is_some_and(|f| f.path == path && f.doc.is_none());
+                self.on_disk(path, Some((doc, rev)));
+                if was_loading && let Some(plan) = self.shot.clone() {
+                    return self.shoot(&plan);
+                }
+            }
+            Event::Missing(path) => self.on_disk(path, None),
+            Event::Saved {
+                path,
+                text,
+                revision,
+            } => {
+                if let Some(ds) = self.disk.get_mut(&path) {
+                    ds.base = Some(revision);
+                    ds.base_text = text;
+                    if !ds.dirty() && self.file.as_ref().is_none_or(|f| f.path != path) {
+                        self.disk.remove(&path);
                     }
                 }
             }
-            Event::Missing(path) => {
-                if let Some(f) = self.file.as_mut().filter(|f| f.path == path) {
-                    f.missing = true;
+            Event::Stale { path, disk } => self.on_disk(path, disk),
+            Event::Flushed => {
+                if self.closing {
+                    return iced::exit();
                 }
             }
             Event::Error(e) => self.status = Some(e),
         }
         Task::none()
+    }
+
+    /// A disk version of `path` (or its absence) arrived: from loading,
+    /// an outside change, or a refused save.
+    fn on_disk(&mut self, path: String, disk: Option<(Arc<Document>, Revision)>) {
+        let open = self.file.as_mut().filter(|f| f.path == path);
+        let state = self.disk.get(&path).cloned();
+        let dirty = state.as_ref().is_some_and(DiskState::dirty);
+        let Some((doc, rev)) = disk else {
+            if let Some(mut ds) = state.filter(|_| dirty) {
+                ds.conflict = Some(DiskCopy::Deleted);
+                self.disk.insert(path.clone(), ds);
+                if open.is_none() {
+                    self.status = Some(format!(
+                        "{path} was deleted while it had unsaved edits; open it to choose"
+                    ));
+                }
+            } else {
+                self.disk.remove(&path);
+                if let Some(f) = open {
+                    f.missing = true;
+                    f.editor = None;
+                }
+            }
+            return;
+        };
+        let Some(mut ds) = state.filter(|_| dirty) else {
+            if open.is_some() {
+                self.disk
+                    .insert(path.clone(), DiskState::clean(Some(rev), doc.text()));
+            }
+            if let Some(f) = open {
+                f.adopt(doc);
+            }
+            return;
+        };
+        if ds.base == Some(rev) {
+            // Nothing new on disk: show the unsaved text if it isn't yet.
+            if let Some(f) = open.filter(|f| f.doc.is_none()) {
+                f.show(Arc::new(Document::parse(
+                    ds.latest.as_str(),
+                    doc.keywords().clone(),
+                )));
+            }
+            return;
+        }
+        if let Some(m) = editing::merge3(&ds.base_text, &ds.latest, doc.text()) {
+            ds.base = Some(rev);
+            ds.base_text = Arc::new(doc.text().to_string());
+            ds.latest = Arc::new(m.text.clone());
+            ds.conflict = None;
+            if let Some(w) = &self.worker {
+                w.send(Request::Save {
+                    path: path.clone(),
+                    text: Arc::clone(&ds.latest),
+                    base: ds.base,
+                });
+            }
+            if let Some(f) = open {
+                let merged = Document::parse(m.text.clone(), doc.keywords().clone());
+                if f.doc.is_none() {
+                    f.show(Arc::new(merged));
+                } else {
+                    f.merged(merged, &m);
+                }
+            }
+            self.disk.insert(path, ds);
+        } else {
+            if let Some(f) = open.filter(|f| f.doc.is_none()) {
+                f.show(Arc::new(Document::parse(
+                    ds.latest.as_str(),
+                    doc.keywords().clone(),
+                )));
+            } else if self.file.as_ref().is_none_or(|f| f.path != path) {
+                self.status = Some(format!(
+                    "{path} changed on disk and conflicts with unsaved edits; open it to choose"
+                ));
+            }
+            ds.conflict = Some(DiskCopy::Changed(doc, rev));
+            self.disk.insert(path, ds);
+            // A conflict cancels closing: the user must choose first.
+            self.closing = false;
+        }
+    }
+
+    /// Sends the open file's working text to be saved.
+    fn save_open(&mut self) {
+        let Some(f) = &self.file else { return };
+        let Some(doc) = &f.doc else { return };
+        let ds = self
+            .disk
+            .entry(f.path.clone())
+            .or_insert_with(|| DiskState::clean(None, ""));
+        if ds.latest.as_str() == doc.text() {
+            return;
+        }
+        ds.latest = Arc::new(doc.text().to_string());
+        if ds.conflict.is_none()
+            && let Some(w) = &self.worker
+        {
+            w.send(Request::Save {
+                path: f.path.clone(),
+                text: Arc::clone(&ds.latest),
+                base: ds.base,
+            });
+        }
+    }
+
+    /// Applies `edit` to the open document as one undo step.
+    fn edit_doc(&mut self, edit: impl FnOnce(&mut Document) -> Result<(), EditError>) {
+        let Some(f) = &mut self.file else { return };
+        let Some(doc) = &f.doc else { return };
+        let mut d = (**doc).clone();
+        if let Err(e) = edit(&mut d) {
+            self.status = Some(e.to_string());
+            return;
+        }
+        if d.text() == doc.text() {
+            return;
+        }
+        let before = f.snapshot();
+        f.change(before, d, Group::Single);
+        self.save_open();
+    }
+
+    /// Applies `edit` to the selected heading, keeping its editor in step.
+    fn edit_heading(&mut self, edit: impl FnOnce(&mut Document, usize) -> Result<(), EditError>) {
+        let Some(f) = &mut self.file else { return };
+        let (Selected::Heading(i), Some(doc)) = (f.selected, &f.doc) else {
+            return;
+        };
+        let mut d = (**doc).clone();
+        if let Err(e) = edit(&mut d, i) {
+            self.status = Some(e.to_string());
+            return;
+        }
+        if d.text() == doc.text() {
+            return;
+        }
+        let before = f.snapshot();
+        if let (Some(ed), Some(range)) = (f.editor.as_mut(), d.section_range(i)) {
+            let cursor = ed.content.cursor();
+            *ed = SectionEditor::new(&d, range);
+            ed.content.move_to(cursor);
+        }
+        f.change(before, d, Group::Single);
+        f.fill_inputs();
+        self.save_open();
+    }
+
+    fn apply_field(&mut self, field: Field) {
+        let Some(f) = &self.file else { return };
+        match field {
+            Field::Tags => {
+                let tags: Vec<String> = f
+                    .inputs
+                    .tags
+                    .split(|c: char| c.is_whitespace() || c == ':' || c == ',')
+                    .filter(|t| !t.is_empty())
+                    .map(String::from)
+                    .collect();
+                self.edit_heading(|d, i| d.set_tags(i, &tags));
+            }
+            Field::Scheduled | Field::Deadline => {
+                let (kind, input) = if field == Field::Scheduled {
+                    (PlanningKind::Scheduled, &f.inputs.scheduled)
+                } else {
+                    (PlanningKind::Deadline, &f.inputs.deadline)
+                };
+                match parse_when(input, self.today) {
+                    Ok(ts) => self.set_date(kind, ts.as_ref()),
+                    Err(()) => {
+                        self.status = Some(format!(
+                            "Couldn't read “{}” as a date: try 2026-11-24, 2026-11-24 09:30, today, tomorrow or +3d",
+                            input.trim()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    fn set_date(&mut self, kind: PlanningKind, ts: Option<&Timestamp>) {
+        self.edit_heading(|d, i| match kind {
+            PlanningKind::Deadline => d.set_deadline(i, ts),
+            _ => d.set_scheduled(i, ts),
+        });
+    }
+
+    fn start_editing(&mut self) -> Task<Message> {
+        let Some(f) = &mut self.file else {
+            return Task::none();
+        };
+        if f.missing {
+            return Task::none();
+        }
+        let (Some(doc), Some(range)) = (f.doc.clone(), f.edit_range()) else {
+            return Task::none();
+        };
+        if f.selected == Selected::Nothing {
+            f.selected = Selected::Intro;
+        }
+        f.editor = Some(SectionEditor::new(&doc, range));
+        iced::widget::operation::focus(EDITOR_ID)
+    }
+
+    fn stop_editing(&mut self) {
+        if let Some(f) = &mut self.file {
+            f.editor = None;
+            f.refresh_blocks();
+            f.fill_inputs();
+        }
+    }
+
+    fn editor_action(&mut self, action: Action) {
+        let Some(f) = &mut self.file else { return };
+        let is_edit = action.is_edit();
+        let before = if is_edit { f.snapshot() } else { None };
+        let Some(ed) = &mut f.editor else { return };
+        ed.content.perform(action);
+        if is_edit {
+            self.sync_editor(before, Group::Typing);
+        }
+    }
+
+    /// Enter in the editor, continuing or ending a list.
+    fn enter(&mut self) {
+        let Some(f) = &mut self.file else { return };
+        let before = f.snapshot();
+        let Some(ed) = &mut f.editor else { return };
+        let cursor = ed.content.cursor();
+        let line = ed
+            .content
+            .line(cursor.position.line)
+            .map(|l| l.text.into_owned())
+            .unwrap_or_default();
+        let at_end = cursor.selection.is_none() && cursor.position.column == line.len();
+        match editing::continue_list(&line).filter(|_| at_end) {
+            Some(ListContinue::Item(prefix)) => {
+                ed.content.perform(Action::Edit(Edit::Enter));
+                ed.content
+                    .perform(Action::Edit(Edit::Paste(Arc::new(prefix))));
+            }
+            Some(ListContinue::End) => {
+                ed.content.perform(Action::Move(Motion::Home));
+                ed.content.perform(Action::Select(Motion::End));
+                ed.content.perform(Action::Edit(Edit::Backspace));
+            }
+            None => ed.content.perform(Action::Edit(Edit::Enter)),
+        }
+        self.sync_editor(before, Group::Single);
+    }
+
+    /// Splices the editor's text into the document.
+    fn sync_editor(&mut self, before: Option<crate::file::Snapshot>, group: Group) {
+        let Some(f) = &mut self.file else { return };
+        let (Some(doc), Some(ed)) = (&f.doc, &mut f.editor) else {
+            return;
+        };
+        let mut new = ed.content.text();
+        let range = ed.range.clone();
+        // The section must keep ending in a line break when text follows,
+        // or the next heading would join its last line.
+        if range.end < doc.text().len() && !new.ends_with('\n') {
+            new.push_str(if doc.text().contains("\r\n") {
+                "\r\n"
+            } else {
+                "\n"
+            });
+        }
+        if new == doc.text()[range.clone()] {
+            return;
+        }
+        let mut d = (**doc).clone();
+        d.replace_range(range.clone(), &new);
+        ed.range = range.start..range.start + new.len();
+        f.change(before, d, group);
+        self.save_open();
+    }
+
+    fn undo(&mut self, redo: bool) {
+        if let Some(f) = &mut self.file
+            && f.undo(redo)
+        {
+            f.fill_inputs();
+            self.save_open();
+        }
+    }
+
+    /// Conflict: the unsaved edits win.
+    fn keep_mine(&mut self) {
+        let Some(f) = &self.file else { return };
+        let Some(ds) = self.disk.get_mut(&f.path) else {
+            return;
+        };
+        match ds.conflict.take() {
+            Some(DiskCopy::Changed(doc, rev)) => {
+                ds.base = Some(rev);
+                ds.base_text = Arc::new(doc.text().to_string());
+            }
+            Some(DiskCopy::Deleted) => {
+                ds.base = None;
+                ds.base_text = Arc::new(String::new());
+            }
+            None => return,
+        }
+        if let Some(w) = &self.worker {
+            w.send(Request::Save {
+                path: f.path.clone(),
+                text: Arc::clone(&ds.latest),
+                base: ds.base,
+            });
+        }
+    }
+
+    /// Conflict: the disk version wins; the unsaved text stays one undo away.
+    fn use_disk(&mut self) {
+        let Some(f) = &mut self.file else { return };
+        let Some(ds) = self.disk.get_mut(&f.path) else {
+            return;
+        };
+        match ds.conflict.take() {
+            Some(DiskCopy::Changed(doc, rev)) => {
+                *ds = DiskState::clean(Some(rev), doc.text());
+                let mine = f.snapshot();
+                f.adopt(Arc::clone(&doc));
+                let disk_text = Document::parse(doc.text(), doc.keywords().clone());
+                // Put the dropped text on the undo stack.
+                f.change(mine, disk_text, Group::Single);
+                self.status = Some("Kept the disk version; Undo brings your edits back".into());
+            }
+            Some(DiskCopy::Deleted) => {
+                self.disk.remove(&f.path);
+                f.missing = true;
+                f.editor = None;
+            }
+            None => {}
+        }
+    }
+
+    fn on_key(&mut self, event: &keyboard::Event) -> Task<Message> {
+        let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
+            return Task::none();
+        };
+        let editing = self.file.as_ref().is_some_and(|f| f.editor.is_some());
+        if editing || !modifiers.command() {
+            return Task::none();
+        }
+        match key.as_ref() {
+            Key::Character(c) if c.eq_ignore_ascii_case("z") => self.undo(modifiers.shift()),
+            Key::Character(c) if c.eq_ignore_ascii_case("y") => self.undo(true),
+            Key::Character(c) if c.eq_ignore_ascii_case("e") => return self.start_editing(),
+            Key::Character(c) if c.eq_ignore_ascii_case("o") => {
+                return self.update(Message::PickFolder);
+            }
+            _ => {}
+        }
+        Task::none()
+    }
+
+    /// Writes pending saves before closing; an unresolved conflict asks first.
+    fn close(&mut self) -> Task<Message> {
+        let conflicts = self.disk.values().any(|d| d.conflict.is_some());
+        if conflicts && !self.close_warned {
+            self.close_warned = true;
+            self.status = Some(
+                "Some edits conflict with changes on disk and aren't saved. Choose a version, or close again to discard them."
+                    .into(),
+            );
+            return Task::none();
+        }
+        match &self.worker {
+            Some(w) => {
+                self.closing = true;
+                w.send(Request::Flush);
+                Task::none()
+            }
+            None => iced::exit(),
+        }
+    }
+
+    fn shoot(&mut self, plan: &shot::Plan) -> Task<Message> {
+        if let Some(f) = &mut self.file
+            && let Some(i) = plan.heading
+        {
+            f.selected = Selected::Heading(i);
+            f.refresh_blocks();
+            f.fill_inputs();
+        }
+        let focus = if plan.edit {
+            self.start_editing()
+        } else {
+            Task::none()
+        };
+        focus.chain(capture())
     }
 
     fn follow_link(&mut self, target: &str) {
@@ -356,12 +863,16 @@ impl App {
             column![
                 text("Blossom").size(32),
                 text("Open a folder of .org files").size(15),
+                button("Choose folder…").on_press(Message::PickFolder),
+                text("or type its path:").size(13).style(dim),
                 row![
                     text_input("~/org", &self.vault_input)
                         .on_input(Message::VaultInput)
                         .on_submit(Message::OpenTyped)
                         .width(360),
-                    button("Open").on_press(Message::OpenTyped),
+                    button("Open")
+                        .on_press(Message::OpenTyped)
+                        .style(button::secondary),
                 ]
                 .spacing(8),
                 text("Tip: set `vault` in ~/.config/blossom/config.toml to open it on start.")
@@ -428,7 +939,20 @@ impl App {
             .and_then(|r| r.file_name())
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         column![
-            container(text(name).size(13).font(bold()).style(dim)).padding([10, 12]),
+            row![
+                text(name).size(13).font(bold()).style(dim).width(Fill),
+                button(text("Open…").size(12))
+                    .on_press(Message::PickFolder)
+                    .padding([2, 6])
+                    .style(button::text),
+            ]
+            .align_y(iced::Center)
+            .padding(iced::Padding {
+                top: 8.0,
+                right: 6.0,
+                bottom: 8.0,
+                left: 12.0
+            }),
             scrollable(Column::with_children(rows).spacing(1).padding([0, 6])).height(Fill),
         ]
         .into()
@@ -438,11 +962,12 @@ impl App {
         let Some(f) = &self.file else {
             return placeholder("Choose a file");
         };
-        if f.missing {
-            return placeholder("This file was deleted or moved");
-        }
         let Some(doc) = &f.doc else {
-            return placeholder("Loading…");
+            return placeholder(if f.missing {
+                "This file was deleted or moved"
+            } else {
+                "Loading…"
+            });
         };
         let title = doc
             .preamble()
@@ -451,9 +976,14 @@ impl App {
             .find(|(k, _)| k.eq_ignore_ascii_case("TITLE"))
             .map_or_else(|| f.path.clone(), |(_, v)| v.clone());
         let mut items: Vec<Element<'_, Message>> = Vec::new();
-        if doc.preamble().intro.is_some() {
+        if !doc.top_range().is_empty() || doc.headings().is_empty() {
+            let label = if doc.preamble().intro.is_some() {
+                "Intro"
+            } else {
+                "Top of file"
+            };
             items.push(
-                button(text("Intro").size(14).font(Font {
+                button(text(label).size(14).font(Font {
                     style: font::Style::Italic,
                     ..Font::DEFAULT
                 }))
@@ -495,11 +1025,13 @@ impl App {
                 .into(),
             );
         }
-        if items.is_empty() {
-            items.push(text("No headings").size(14).style(dim).into());
-        }
         column![
-            container(text(title).size(18).font(bold())).padding([10, 14]),
+            row![
+                text(title).size(18).font(bold()).width(Fill),
+                text(self.save_state(f)).size(12).style(dim),
+            ]
+            .align_y(iced::Center)
+            .padding([10, 14]),
             scrollable(
                 Column::with_children(items)
                     .spacing(1)
@@ -515,6 +1047,15 @@ impl App {
         .into()
     }
 
+    /// "Saving…", "Not saved" or nothing.
+    fn save_state(&self, f: &OpenFile) -> &'static str {
+        match self.disk.get(&f.path) {
+            Some(ds) if ds.conflict.is_some() => "Not saved",
+            Some(ds) if ds.dirty() => "Saving…",
+            _ => "",
+        }
+    }
+
     fn reader(&self) -> Element<'_, Message> {
         let Some(f) = self.file.as_ref().filter(|f| !f.missing) else {
             return placeholder("");
@@ -522,52 +1063,80 @@ impl App {
         let Some(doc) = &f.doc else {
             return placeholder("");
         };
-        let ink = self.ink();
         let mut parts: Vec<Element<'_, Message>> = Vec::new();
-        match f.selected {
-            Selected::Nothing => return placeholder("Select a heading to read it"),
-            Selected::Intro => parts.push(text("Intro").size(22).font(bold()).into()),
-            Selected::Heading(i) => {
-                let Some(h) = doc.heading(i) else {
-                    return placeholder("Select a heading to read it");
-                };
+        if let Some(banner) = self.conflict_banner(f) {
+            parts.push(banner);
+        }
+        let heading = match f.selected {
+            Selected::Heading(i) => doc.heading(i),
+            _ => None,
+        };
+        if let Some(ed) = &f.editor {
+            return self.editing(parts, f, ed, doc, heading);
+        }
+        let ink = self.ink();
+        let actions = Actions {
+            link: Message::Link,
+            check: Message::ToggleCheckbox,
+        };
+        let edit_button = button(text("Edit").size(13))
+            .on_press(Message::StartEditing)
+            .padding([3, 10])
+            .style(button::secondary);
+        match (f.selected, heading) {
+            (Selected::Heading(i), Some(h)) => {
                 let title = f.titles.get(i).map_or(&[][..], Vec::as_slice);
-                parts.push(read::sized(title, 24, ink, Message::Link));
-                let mut meta = row![].spacing(6);
-                let mut any = false;
-                for c in heading_chips(h, doc, self.today, true) {
-                    meta = meta.push(c);
-                    any = true;
-                }
-                if any {
-                    parts.push(meta.into());
+                parts.push(
+                    row![
+                        container(read::sized(title, 24, ink, Message::Link)).width(Fill),
+                        history_buttons(f),
+                        edit_button
+                    ]
+                    .spacing(6)
+                    .into(),
+                );
+                parts.push(self.metadata(h, doc));
+                let chips = reader_chips(h, doc, self.today);
+                if !chips.is_empty() {
+                    parts.push(row(chips).spacing(6).wrap().into());
                 }
                 if !h.properties.is_empty() {
-                    let props = h.properties.iter().map(|(k, v)| {
-                        row![
-                            text(format!("{k}:"))
-                                .size(12)
-                                .font(Font::MONOSPACE)
-                                .style(dim),
-                            text(v.as_str()).size(12).font(Font::MONOSPACE),
-                        ]
-                        .spacing(8)
-                        .into()
-                    });
-                    parts.push(Column::with_children(props).spacing(2).into());
+                    parts.push(properties(h));
                 }
                 parts.push(rule::horizontal(1).into());
             }
+            (Selected::Heading(_), None) | (Selected::Nothing, _) => {
+                return placeholder("Select a heading to read it");
+            }
+            (Selected::Intro, _) => parts.push(
+                row![
+                    text(if doc.preamble().intro.is_some() {
+                        "Intro"
+                    } else {
+                        "Top of file"
+                    })
+                    .size(22)
+                    .font(bold())
+                    .width(Fill),
+                    history_buttons(f),
+                    edit_button
+                ]
+                .spacing(6)
+                .into(),
+            ),
         }
-        if f.blocks.is_empty() && matches!(f.selected, Selected::Heading(_)) {
+        if f.blocks.is_empty() {
             parts.push(
-                text("No text under this heading")
-                    .size(14)
-                    .style(dim)
-                    .into(),
+                text(match f.selected {
+                    Selected::Heading(_) => "No text under this heading",
+                    _ => "Nothing here yet. Choose Edit to write.",
+                })
+                .size(14)
+                .style(dim)
+                .into(),
             );
         } else {
-            parts.push(read::blocks(&f.blocks, ink, Message::Link));
+            parts.push(read::blocks(&f.blocks, ink, actions));
         }
         scrollable(
             Column::with_children(parts)
@@ -580,39 +1149,245 @@ impl App {
         .into()
     }
 
+    /// The read pane while editing: header, metadata panel and editor.
+    fn editing<'a>(
+        &'a self,
+        mut parts: Vec<Element<'a, Message>>,
+        f: &'a OpenFile,
+        ed: &'a SectionEditor,
+        doc: &'a Document,
+        heading: Option<&'a Heading>,
+    ) -> Element<'a, Message> {
+        parts.push(
+            row![
+                text(if heading.is_some() {
+                    "Editing heading"
+                } else {
+                    "Editing top of file"
+                })
+                .size(13)
+                .style(dim)
+                .width(Fill),
+                text("Esc to finish").size(12).style(dim),
+                history_buttons(f),
+                button(text("Done").size(13))
+                    .on_press(Message::StopEditing)
+                    .padding([3, 10]),
+            ]
+            .spacing(10)
+            .align_y(iced::Center)
+            .into(),
+        );
+        if let Some(h) = heading {
+            parts.push(self.metadata(h, doc));
+        }
+        parts.push(
+            text_editor(&ed.content)
+                .id(EDITOR_ID)
+                .on_action(Message::EditorAction)
+                .highlight_with::<editor::Org>(doc.keywords().clone(), editor::format)
+                .key_binding(editor::bindings(Message::EditorCommand))
+                .font(Font::MONOSPACE)
+                .size(14)
+                .padding(12)
+                .height(Fill)
+                .style(style::editor)
+                .into(),
+        );
+        Column::with_children(parts)
+            .spacing(10)
+            .padding([16, 20])
+            .height(Fill)
+            .into()
+    }
+
+    fn conflict_banner(&self, f: &OpenFile) -> Option<Element<'_, Message>> {
+        let copy = self.disk.get(&f.path)?.conflict.as_ref()?;
+        let msg = match copy {
+            DiskCopy::Changed(..) => {
+                "Another program changed this file where you were editing. Your edits aren't saved yet."
+            }
+            DiskCopy::Deleted => "This file was deleted. Your edits aren't saved.",
+        };
+        let disk_label = match copy {
+            DiskCopy::Changed(..) => "Use the disk version",
+            DiskCopy::Deleted => "Discard my edits",
+        };
+        Some(
+            container(
+                column![
+                    text(msg).size(13),
+                    row![
+                        button(text("Keep mine").size(13)).on_press(Message::KeepMine),
+                        button(text(disk_label).size(13))
+                            .on_press(Message::UseDisk)
+                            .style(button::secondary),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(8),
+            )
+            .padding(10)
+            .width(Fill)
+            .style(style::banner)
+            .into(),
+        )
+    }
+
+    /// The metadata panel: keyword, priority, tags, scheduled, deadline.
+    fn metadata<'a>(&'a self, h: &Heading, doc: &Document) -> Element<'a, Message> {
+        let Some(f) = &self.file else {
+            return space::horizontal().into();
+        };
+        let mut keywords: Vec<String> = vec![NONE.to_string()];
+        keywords.extend(doc.keywords().all().map(String::from));
+        let mut priorities: Vec<String> = [NONE, "A", "B", "C"].map(String::from).to_vec();
+        if let Some(p) = h.priority.as_ref().filter(|p| !priorities.contains(p)) {
+            priorities.push(p.clone());
+        }
+        let label = |s: &'a str| text(s).size(12).style(dim);
+        let small = |s: &'a str, value: &'a str, field: Field| {
+            text_input(s, value)
+                .on_input(move |v| Message::Input(field, v))
+                .on_submit(Message::Apply(field))
+                .size(13)
+                .padding([3, 6])
+        };
+        let date = |name: &'a str, value: &'a str, field: Field, kind: PlanningKind| {
+            row![
+                label(name).width(70),
+                small("2026-11-24, today, +3d", value, field).width(Fill),
+                button(text("Set").size(12))
+                    .on_press(Message::Apply(field))
+                    .padding([3, 8])
+                    .style(button::secondary),
+                button(text("×").size(13))
+                    .on_press(Message::ClearDate(kind))
+                    .padding([2, 8])
+                    .style(button::text),
+            ]
+            .spacing(6)
+            .align_y(iced::Center)
+        };
+        column![
+            row![
+                pick_list(
+                    keywords,
+                    Some(h.keyword.clone().unwrap_or_else(|| NONE.to_string())),
+                    Message::SetKeyword
+                )
+                .text_size(13)
+                .padding([3, 8]),
+                pick_list(
+                    priorities,
+                    Some(h.priority.clone().unwrap_or_else(|| NONE.to_string())),
+                    Message::SetPriority
+                )
+                .text_size(13)
+                .padding([3, 8]),
+                label("Tags"),
+                small("work home", &f.inputs.tags, Field::Tags).width(Fill),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+            date(
+                "Scheduled",
+                &f.inputs.scheduled,
+                Field::Scheduled,
+                PlanningKind::Scheduled
+            ),
+            date(
+                "Deadline",
+                &f.inputs.deadline,
+                Field::Deadline,
+                PlanningKind::Deadline
+            ),
+        ]
+        .spacing(6)
+        .into()
+    }
+
     fn ink(&self) -> Ink {
         Ink::of(&style::theme(self.mode))
     }
 }
 
-impl OpenFile {
-    fn set_document(&mut self, doc: Arc<Document>) {
-        self.titles = doc
-            .headings()
-            .iter()
-            .map(|h| title_spans(&h.title))
-            .collect();
-        // Keep the selection across outside edits when it still exists.
-        self.selected = match self.selected {
-            Selected::Heading(i) if i < doc.headings().len() => Selected::Heading(i),
-            _ if doc.preamble().intro.is_some() => Selected::Intro,
-            _ if !doc.headings().is_empty() => Selected::Heading(0),
-            _ => Selected::Nothing,
-        };
-        self.folded.retain(|i| *i < doc.headings().len());
-        self.doc = Some(doc);
-        self.missing = false;
-        self.refresh_blocks();
-    }
+/// Undo and Redo, enabled when there is a step.
+fn history_buttons(f: &OpenFile) -> Element<'static, Message> {
+    let (undo, redo) = f.history();
+    let b = |label: &'static str, on: bool, msg: Message| {
+        button(text(label).size(13))
+            .on_press_maybe(on.then_some(msg))
+            .padding([3, 8])
+            .style(button::text)
+    };
+    row![
+        b("Undo", undo, Message::Undo),
+        b("Redo", redo, Message::Redo)
+    ]
+    .spacing(2)
+    .into()
+}
 
-    fn refresh_blocks(&mut self) {
-        let Some(doc) = &self.doc else { return };
-        self.blocks = match self.selected {
-            Selected::Nothing => Vec::new(),
-            Selected::Intro => doc.intro_text().map_or_else(Vec::new, render::blocks),
-            Selected::Heading(i) => render::blocks(doc.body_text(i)),
-        };
+/// A heading's properties, one `KEY: value` per line.
+fn properties(h: &Heading) -> Element<'_, Message> {
+    let props = h.properties.iter().map(|(k, v)| {
+        row![
+            text(format!("{k}:"))
+                .size(12)
+                .font(Font::MONOSPACE)
+                .style(dim),
+            text(v.as_str()).size(12).font(Font::MONOSPACE),
+        ]
+        .spacing(8)
+        .into()
+    });
+    Column::with_children(props).spacing(2).into()
+}
+
+/// Reads a date typed into the metadata panel: an org timestamp,
+/// `YYYY-MM-DD` with an optional `HH:MM`, `today`, `tomorrow` or `+N` days
+/// (`+Nw` weeks). Empty clears the date (`Ok(None)`).
+fn parse_when(input: &str, today: NaiveDate) -> Result<Option<Timestamp>, ()> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Ok(None);
     }
+    if s.starts_with(['<', '[']) {
+        let mut ts = Timestamp::parse(s).ok_or(())?;
+        ts.active = true;
+        return Ok(Some(ts));
+    }
+    let lower = s.to_lowercase();
+    let mut words = lower.split_whitespace();
+    let day = words.next().ok_or(())?;
+    let date = match day {
+        "today" => today,
+        "tomorrow" => today.succ_opt().ok_or(())?,
+        d if d.starts_with('+') => {
+            let (n, unit) = d[1..].split_at(
+                d[1..]
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(d.len() - 1),
+            );
+            let n: u64 = n.parse().map_err(|_| ())?;
+            let days = match unit {
+                "" | "d" => n,
+                "w" => n * 7,
+                _ => return Err(()),
+            };
+            today.checked_add_days(chrono::Days::new(days)).ok_or(())?
+        }
+        d => NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| ())?,
+    };
+    let mut ts = Timestamp::new(date, true);
+    if let Some(t) = words.next() {
+        ts.time = Some(NaiveTime::parse_from_str(t, "%H:%M").map_err(|_| ())?);
+    }
+    if words.next().is_some() {
+        return Err(());
+    }
+    Ok(Some(ts))
 }
 
 /// Waits for the window to settle, then captures it.
@@ -626,18 +1401,6 @@ fn capture() -> Task<Message> {
     .map(Message::Shot)
 }
 
-/// A heading title's inline markup as spans.
-fn title_spans(title: &str) -> Vec<Span> {
-    match render::blocks(title).into_iter().next() {
-        Some(Block::Paragraph(spans)) => spans,
-        _ => vec![Span {
-            text: title.to_string(),
-            style: render::Style::default(),
-            link: None,
-        }],
-    }
-}
-
 /// One outline row: keyword, priority and title; tags and dates on a second
 /// line, so a long title keeps the full width.
 fn heading_line<'a>(
@@ -647,10 +1410,7 @@ fn heading_line<'a>(
     today: NaiveDate,
     ink: Ink,
 ) -> Element<'a, Message> {
-    let done = h
-        .keyword
-        .as_deref()
-        .is_some_and(|k| doc.keywords().is_done(k));
+    let done = is_done(h, doc);
     let mut first = row![].spacing(6).align_y(iced::Center);
     if let Some(k) = &h.keyword {
         first = first.push(chip(k.clone(), if done { Chip::Done } else { Chip::Todo }));
@@ -659,7 +1419,10 @@ fn heading_line<'a>(
         first = first.push(chip(format!("#{p}"), Chip::Priority));
     }
     first = first.push(container(read::paragraph(title, ink, Message::Link)).width(Fill));
-    let chips = heading_chips(h, doc, today, false);
+    let mut chips: Vec<Element<'a, Message>> =
+        h.tags.iter().map(|t| chip(t.clone(), Chip::Tag)).collect();
+    chips.extend(date_chips(h, doc, today));
+    chips.extend(event_chips(h, today));
     if chips.is_empty() {
         return first.into();
     }
@@ -668,60 +1431,59 @@ fn heading_line<'a>(
         .into()
 }
 
-/// Tag and date chips. `full` adds the keyword, priority, inherited tags and CLOSED.
-fn heading_chips<'a>(
-    h: &Heading,
-    doc: &Document,
-    today: NaiveDate,
-    full: bool,
-) -> Vec<Element<'a, Message>> {
-    let done = h
-        .keyword
+fn is_done(h: &Heading, doc: &Document) -> bool {
+    h.keyword
         .as_deref()
-        .is_some_and(|k| doc.keywords().is_done(k));
-    let mut out = Vec::new();
-    if full {
-        if let Some(k) = &h.keyword {
-            out.push(chip(k.clone(), if done { Chip::Done } else { Chip::Todo }));
-        }
-        if let Some(p) = &h.priority {
-            out.push(chip(format!("#{p}"), Chip::Priority));
-        }
+        .is_some_and(|k| doc.keywords().is_done(k))
+}
+
+/// What the read view shows besides the metadata panel: inherited tags,
+/// event dates and CLOSED.
+fn reader_chips<'a>(h: &Heading, doc: &Document, today: NaiveDate) -> Vec<Element<'a, Message>> {
+    let mut out: Vec<Element<'a, Message>> = doc
+        .inherited_tags(h.index)
+        .into_iter()
+        .filter(|t| !h.tags.contains(t))
+        .map(|t| chip(format!("{t} (inherited)"), Chip::Tag))
+        .collect();
+    out.extend(event_chips(h, today));
+    if let Some(c) = &h.planning.closed {
+        out.push(chip(format!("Closed {}", short_date(c, today)), Chip::Date));
     }
-    let tags = if full {
-        doc.inherited_tags(h.index)
-    } else {
-        h.tags.clone()
-    };
-    for t in tags {
-        out.push(chip(t, Chip::Tag));
-    }
-    let dated = |label: &str, ts: &Timestamp, can_be_late: bool| {
-        let late = can_be_late && !done && ts.date < today;
+    out
+}
+
+/// SCHEDULED and DEADLINE chips; red when past on an open item.
+fn date_chips<'a>(h: &Heading, doc: &Document, today: NaiveDate) -> Vec<Element<'a, Message>> {
+    let done = is_done(h, doc);
+    let dated = |label: &str, ts: &Timestamp| {
+        let late = !done && ts.date < today;
         chip(
             format!("{label} {}", short_date(ts, today)),
             if late { Chip::Overdue } else { Chip::Date },
         )
     };
+    let mut out = Vec::new();
     if let Some(s) = &h.planning.scheduled {
-        out.push(dated("Scheduled", s, true));
+        out.push(dated("Scheduled", s));
     }
     if let Some(d) = &h.planning.deadline {
-        out.push(dated("Due", d, true));
+        out.push(dated("Due", d));
     }
-    // Events: the dedicated timestamp line, else the first stamp in the body.
+    out
+}
+
+/// Events: the dedicated timestamp line, else the first stamp in the body.
+fn event_chips<'a>(h: &Heading, today: NaiveDate) -> Vec<Element<'a, Message>> {
     let events = if h.dedicated_timestamps.is_empty() {
         h.active_timestamps.iter().take(1).collect::<Vec<_>>()
     } else {
         h.dedicated_timestamps.iter().collect()
     };
-    for e in events {
-        out.push(chip(short_date(e, today), Chip::Date));
-    }
-    if full && let Some(c) = &h.planning.closed {
-        out.push(dated("Closed", c, false));
-    }
-    out
+    events
+        .into_iter()
+        .map(|e| chip(short_date(e, today), Chip::Date))
+        .collect()
 }
 
 /// `Nov 23`, `Nov 23 09:00`, `Nov 23, 2027`.
@@ -818,6 +1580,7 @@ fn open_externally(target: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use blossom_core::Keywords;
+    use blossom_core::render::Block;
 
     fn app() -> App {
         let template = OpenVault {
@@ -839,6 +1602,48 @@ mod tests {
         Arc::new(Document::parse(s, Keywords::default()))
     }
 
+    fn rev(n: u64) -> Revision {
+        Revision {
+            mtime_ns: n,
+            size: n,
+        }
+    }
+
+    /// Loads `text` as `a.org` at revision 1.
+    fn loaded(text: &str) -> App {
+        let mut a = app();
+        let _ = a.update(Message::Worker(Event::Opened(PathBuf::from("/v"))));
+        let _ = a.update(Message::SelectFile("a.org".into()));
+        let _ = a.update(Message::Worker(Event::Document(
+            "a.org".into(),
+            doc(text),
+            rev(1),
+        )));
+        a
+    }
+
+    fn text_of(a: &App) -> String {
+        a.file
+            .as_ref()
+            .unwrap()
+            .doc
+            .as_ref()
+            .unwrap()
+            .text()
+            .to_string()
+    }
+
+    fn type_text(a: &mut App, s: &str) {
+        for c in s.chars() {
+            let edit = if c == '\n' {
+                Edit::Enter
+            } else {
+                Edit::Insert(c)
+            };
+            let _ = a.update(Message::EditorAction(Action::Edit(edit)));
+        }
+    }
+
     #[test]
     fn opening_a_file_selects_intro_then_follows_clicks() {
         let mut a = app();
@@ -848,6 +1653,7 @@ mod tests {
         let _ = a.update(Message::Worker(Event::Document(
             "a.org".into(),
             doc("Intro *text*\n* TODO one\nbody of one\n* two\n"),
+            rev(1),
         )));
         let f = a.file.as_ref().unwrap();
         assert_eq!(f.selected, Selected::Intro);
@@ -860,23 +1666,20 @@ mod tests {
         let _ = a.update(Message::Worker(Event::Document(
             "b.org".into(),
             doc("* x\n"),
+            rev(1),
         )));
         assert_eq!(a.file.as_ref().unwrap().titles.len(), 2);
     }
 
     #[test]
     fn outside_edit_keeps_selection_when_possible() {
-        let mut a = app();
-        let _ = a.update(Message::SelectFile("a.org".into()));
-        let _ = a.update(Message::Worker(Event::Document(
-            "a.org".into(),
-            doc("* one\n* two\nold\n"),
-        )));
+        let mut a = loaded("* one\n* two\nold\n");
         let _ = a.update(Message::Select(Selected::Heading(1)));
         let _ = a.update(Message::ToggleFold(1));
         let _ = a.update(Message::Worker(Event::Document(
             "a.org".into(),
             doc("* one\n* two\nnew body\n"),
+            rev(2),
         )));
         let f = a.file.as_ref().unwrap();
         assert_eq!(f.selected, Selected::Heading(1));
@@ -884,11 +1687,164 @@ mod tests {
         let _ = a.update(Message::Worker(Event::Document(
             "a.org".into(),
             doc("* only\n"),
+            rev(3),
         )));
         assert_eq!(a.file.as_ref().unwrap().selected, Selected::Heading(0));
         assert!(a.file.as_ref().unwrap().folded.is_empty());
         let _ = a.update(Message::Worker(Event::Missing("a.org".into())));
         assert!(a.file.as_ref().unwrap().missing);
+    }
+
+    #[test]
+    fn section_editing_splices_and_keeps_the_next_heading() {
+        let mut a = loaded("* one\nbody\n* two\n");
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        let _ = a.update(Message::StartEditing);
+        let ed = a.file.as_ref().unwrap().editor.as_ref().unwrap();
+        assert_eq!(ed.content.text(), "* one\nbody\n");
+        let _ = a.update(Message::EditorAction(Action::Move(Motion::DocumentEnd)));
+        type_text(&mut a, "more");
+        // Typing at the empty last line would join "* two"; a line break is kept.
+        assert_eq!(text_of(&a), "* one\nbody\nmore\n* two\n");
+        // Deleting the final line break keeps it in the file too.
+        for _ in 0..5 {
+            let _ = a.update(Message::EditorAction(Action::Edit(Edit::Backspace)));
+        }
+        assert_eq!(text_of(&a), "* one\nbody\n* two\n");
+        // Typing a new heading in the editor shows up in the outline.
+        let _ = a.update(Message::EditorAction(Action::Move(Motion::DocumentStart)));
+        type_text(&mut a, "* zero\n");
+        let f = a.file.as_ref().unwrap();
+        assert_eq!(f.doc.as_ref().unwrap().headings().len(), 3);
+        assert_eq!(f.selected, Selected::Heading(0));
+        assert_eq!(a.save_state(f), "Saving…");
+    }
+
+    #[test]
+    fn enter_continues_and_ends_lists() {
+        let mut a = loaded("* h\n- [X] milk");
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        let _ = a.update(Message::StartEditing);
+        let _ = a.update(Message::EditorAction(Action::Move(Motion::DocumentEnd)));
+        let _ = a.update(Message::EditorCommand(Command::Enter));
+        type_text(&mut a, "eggs");
+        assert_eq!(text_of(&a), "* h\n- [X] milk\n- [ ] eggs");
+        let _ = a.update(Message::EditorCommand(Command::Enter));
+        let _ = a.update(Message::EditorCommand(Command::Enter));
+        assert_eq!(text_of(&a), "* h\n- [X] milk\n- [ ] eggs\n");
+        // Undo steps back over the list edits.
+        let _ = a.update(Message::Undo);
+        assert_eq!(text_of(&a), "* h\n- [X] milk\n- [ ] eggs\n- [ ] ");
+    }
+
+    #[test]
+    fn metadata_panel_edits_the_heading() {
+        let mut a = loaded("* buy milk\n");
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        let _ = a.update(Message::SetKeyword("TODO".into()));
+        let _ = a.update(Message::SetPriority("A".into()));
+        let _ = a.update(Message::Input(Field::Tags, "home, errand".into()));
+        let _ = a.update(Message::Apply(Field::Tags));
+        let _ = a.update(Message::Input(Field::Deadline, "tomorrow 09:30".into()));
+        let _ = a.update(Message::Apply(Field::Deadline));
+        assert_eq!(
+            text_of(&a),
+            "* TODO [#A] buy milk  :home:errand:\nDEADLINE: <2026-11-24 Tue 09:30>\n"
+        );
+        assert_eq!(
+            a.file.as_ref().unwrap().inputs.deadline,
+            "<2026-11-24 Tue 09:30>"
+        );
+        let _ = a.update(Message::ClearDate(PlanningKind::Deadline));
+        let _ = a.update(Message::SetKeyword(NONE.into()));
+        assert_eq!(text_of(&a), "* [#A] buy milk  :home:errand:\n");
+        let _ = a.update(Message::Input(Field::Scheduled, "next week".into()));
+        let _ = a.update(Message::Apply(Field::Scheduled));
+        assert!(a.status.as_deref().unwrap().contains("Couldn't read"));
+        // Each change is its own undo step.
+        let _ = a.update(Message::Undo);
+        let _ = a.update(Message::Undo);
+        assert!(text_of(&a).contains("DEADLINE"));
+    }
+
+    #[test]
+    fn checkboxes_toggle_from_the_read_view() {
+        let mut a = loaded("* list\n- [ ] one\n- [ ] two\n");
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        let Block::ListItem { offset, .. } = a.file.as_ref().unwrap().blocks[0].clone() else {
+            panic!("a list item");
+        };
+        let _ = a.update(Message::ToggleCheckbox(offset));
+        assert_eq!(text_of(&a), "* list\n- [X] one\n- [ ] two\n");
+    }
+
+    #[test]
+    fn outside_change_merges_with_unsaved_edits() {
+        let mut a = loaded("* one\n* two\n* three\n");
+        let _ = a.update(Message::Select(Selected::Heading(2)));
+        let _ = a.update(Message::StartEditing);
+        let _ = a.update(Message::EditorAction(Action::Move(Motion::End)));
+        type_text(&mut a, "!");
+        // Emacs edits heading one meanwhile.
+        let _ = a.update(Message::Worker(Event::Document(
+            "a.org".into(),
+            doc("* one (emacs)\n* two\n* three\n"),
+            rev(2),
+        )));
+        assert_eq!(text_of(&a), "* one (emacs)\n* two\n* three!\n");
+        let ed = a.file.as_ref().unwrap().editor.as_ref().unwrap();
+        assert_eq!(ed.content.text(), "* three!\n");
+        let ds = &a.disk["a.org"];
+        assert_eq!(ds.base, Some(rev(2)));
+        assert!(ds.dirty());
+        // The save lands.
+        let _ = a.update(Message::Worker(Event::Saved {
+            path: "a.org".into(),
+            text: Arc::new("* one (emacs)\n* two\n* three!\n".into()),
+            revision: rev(3),
+        }));
+        assert!(!a.disk["a.org"].dirty());
+        assert_eq!(a.save_state(a.file.as_ref().unwrap()), "");
+    }
+
+    #[test]
+    fn conflicting_change_asks_and_keeps_both_reachable() {
+        let mut a = loaded("* one\n");
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        let _ = a.update(Message::StartEditing);
+        let _ = a.update(Message::EditorAction(Action::Move(Motion::End)));
+        type_text(&mut a, " mine");
+        let _ = a.update(Message::Worker(Event::Stale {
+            path: "a.org".into(),
+            disk: Some((doc("* one theirs\n"), rev(2))),
+        }));
+        assert!(a.disk["a.org"].conflict.is_some());
+        assert_eq!(text_of(&a), "* one mine\n");
+        assert_eq!(a.save_state(a.file.as_ref().unwrap()), "Not saved");
+        // Closing is refused once.
+        let _ = a.update(Message::CloseRequested);
+        assert!(a.status.as_deref().unwrap().contains("close again"));
+        let _ = a.update(Message::UseDisk);
+        assert_eq!(text_of(&a), "* one theirs\n");
+        assert!(!a.disk["a.org"].dirty());
+        let _ = a.update(Message::Undo);
+        assert_eq!(text_of(&a), "* one mine\n");
+    }
+
+    #[test]
+    fn unsaved_text_survives_leaving_and_reopening_a_file() {
+        let mut a = loaded("* one\n");
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        let _ = a.update(Message::SetKeyword("TODO".into()));
+        let _ = a.update(Message::SelectFile("b.org".into()));
+        let _ = a.update(Message::SelectFile("a.org".into()));
+        // The disk still has the old text (the save is waiting).
+        let _ = a.update(Message::Worker(Event::Document(
+            "a.org".into(),
+            doc("* one\n"),
+            rev(1),
+        )));
+        assert_eq!(text_of(&a), "* TODO one\n");
     }
 
     #[test]
@@ -928,6 +1884,16 @@ mod tests {
             short_date(&ts("<2027-01-02 Sat +1w>"), today),
             "Jan 2, 2027 ↻"
         );
+        let when = |s: &str| parse_when(s, today).map(|t| t.map(|t| t.format()));
+        assert_eq!(when("").unwrap(), None);
+        assert_eq!(when("+3d").unwrap().unwrap(), "<2026-11-26 Thu>");
+        assert_eq!(when("+2w").unwrap().unwrap(), "<2026-12-07 Mon>");
+        assert_eq!(when("2026-12-01").unwrap().unwrap(), "<2026-12-01 Tue>");
+        assert_eq!(
+            when("[2026-12-01 Tue +1w]").unwrap().unwrap(),
+            "<2026-12-01 Tue +1w>"
+        );
+        assert!(when("soon").is_err() && when("today 25:00").is_err());
         let mut a = app();
         let _ = a.update(Message::ToggleFolder("x".into()));
         assert!(a.collapsed_folders.contains("x"));

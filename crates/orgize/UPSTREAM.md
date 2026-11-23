@@ -33,3 +33,5 @@
    input fired for an empty greater block (`#+begin_quote\n#+end_quote`). Empty input
    now returns no elements (what release builds already did). Found by proptest;
    regression fixture `blossom-core/tests/fixtures/edge/empty-block.org`.
+6. `src/org.rs`: `Org` derives `Clone` (a `GreenNode` and a `ParseConfig`, both cheap
+   to clone), so Blossom can copy a parsed document and splice edits into the copy.

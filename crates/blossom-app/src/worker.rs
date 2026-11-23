@@ -3,19 +3,24 @@
 //! a [`Handle`]; the worker answers with [`Event`]s through an iced
 //! subscription. External changes (Emacs, Syncthing, git) arrive from the
 //! watcher and refresh the file list and the open file.
+//!
+//! Saves are debounced here: the UI sends the latest text after every edit
+//! and the worker writes it once typing pauses, with the vault's stale-write
+//! guard. A write refused because another program changed the file comes
+//! back as [`Event::Stale`] with the disk version, for the UI to merge.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use blossom_core::{Document, Keywords};
 use blossom_index::NoteIndex;
-use blossom_vault::{Vault, config};
+use blossom_vault::{Revision, Vault, WriteError, config};
 use iced::futures::{SinkExt, StreamExt};
 use iced::{Subscription, futures};
 
@@ -23,6 +28,9 @@ use crate::tree::FileInfo;
 
 /// How long the watcher waits for a burst of changes to settle.
 const DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// How long a save waits for typing to pause.
+pub const SAVE_DELAY: Duration = Duration::from_millis(700);
 
 /// What to open.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +52,19 @@ pub enum Request {
     Open(OpenVault),
     /// Load a file and keep it fresh when it changes.
     Load(String),
+    /// Write `text` to `path` once edits pause. `base` is the disk revision
+    /// the text was made from (`None` for a new file). A newer save for the
+    /// same path replaces a waiting one.
+    Save {
+        /// Vault-relative path.
+        path: String,
+        /// The whole new text.
+        text: Arc<String>,
+        /// The revision the text is based on.
+        base: Option<Revision>,
+    },
+    /// Write every waiting save now, then answer [`Event::Flushed`].
+    Flush,
 }
 
 /// What the worker reports.
@@ -55,8 +76,27 @@ pub enum Event {
     Opened(PathBuf),
     /// The vault's files, sorted by path.
     Files(Arc<Vec<FileInfo>>),
-    /// A file's current content.
-    Document(String, Arc<Document>),
+    /// A file's content on disk, at a revision.
+    Document(String, Arc<Document>, Revision),
+    /// A save was written.
+    Saved {
+        /// Vault-relative path.
+        path: String,
+        /// The text written.
+        text: Arc<String>,
+        /// The file's revision after the write.
+        revision: Revision,
+    },
+    /// A save was refused: the file changed on disk since `base`. Carries
+    /// the disk version, or `None` when the file is gone.
+    Stale {
+        /// Vault-relative path.
+        path: String,
+        /// The disk version.
+        disk: Option<(Arc<Document>, Revision)>,
+    },
+    /// Every waiting save has been written (or failed).
+    Flushed,
     /// The loaded file is gone.
     Missing(String),
     /// Something failed.
@@ -122,6 +162,19 @@ struct Open {
     generation: u64,
     /// Tells the watcher thread of this vault to stop.
     stop: Arc<AtomicBool>,
+    /// Saves waiting for typing to pause.
+    pending: BTreeMap<String, Pending>,
+    /// Revisions this worker wrote, per path, oldest first, starting with
+    /// the base the first write replaced. A save based on any of them is not
+    /// stale as long as the disk is still at the last one: the UI just
+    /// hadn't heard of the newer writes yet.
+    written: HashMap<String, Vec<Option<Revision>>>,
+}
+
+struct Pending {
+    text: Arc<String>,
+    base: Option<Revision>,
+    due: Instant,
 }
 
 impl Drop for Open {
@@ -135,9 +188,31 @@ fn run(inbox: &Receiver<Input>, myself: &Sender<Input>, emit: &mut dyn FnMut(Eve
     let mut open: Option<Open> = None;
     let mut loaded: Option<String> = None;
     let mut generation = 0;
-    while let Ok(input) = inbox.recv() {
+    loop {
+        let due = open
+            .as_ref()
+            .and_then(|o| o.pending.values().map(|p| p.due).min());
+        let input = match due {
+            Some(due) => match inbox.recv_timeout(due.saturating_duration_since(Instant::now())) {
+                Ok(input) => input,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(o) = open.as_mut() {
+                        write_due(o, Instant::now(), emit);
+                    }
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            None => match inbox.recv() {
+                Ok(input) => input,
+                Err(_) => break,
+            },
+        };
         match input {
             Input::Request(Request::Open(req)) => {
+                if let Some(o) = open.as_mut() {
+                    write_due(o, far_future(), emit);
+                }
                 open = None;
                 loaded = None;
                 generation += 1;
@@ -155,6 +230,24 @@ fn run(inbox: &Receiver<Input>, myself: &Sender<Input>, emit: &mut dyn FnMut(Eve
                     emit_document(o, &path, emit);
                     loaded = Some(path);
                 }
+            }
+            Input::Request(Request::Save { path, text, base }) => {
+                if let Some(o) = open.as_mut() {
+                    o.pending.insert(
+                        path,
+                        Pending {
+                            text,
+                            base,
+                            due: Instant::now() + SAVE_DELAY,
+                        },
+                    );
+                }
+            }
+            Input::Request(Request::Flush) => {
+                if let Some(o) = open.as_mut() {
+                    write_due(o, far_future(), emit);
+                }
+                emit(Event::Flushed);
             }
             Input::Changed(g) => {
                 // A notice from a vault that has since been closed is stale.
@@ -217,12 +310,95 @@ fn open_vault(req: &OpenVault, generation: u64, myself: &Sender<Input>) -> Resul
         index,
         generation,
         stop,
+        pending: BTreeMap::new(),
+        written: HashMap::new(),
     })
+}
+
+/// A time after every deadline, to write all waiting saves.
+fn far_future() -> Instant {
+    Instant::now() + Duration::from_secs(3600)
+}
+
+/// Writes every waiting save due by `now`.
+fn write_due(o: &mut Open, now: Instant, emit: &mut dyn FnMut(Event)) {
+    let due: Vec<String> = o
+        .pending
+        .iter()
+        .filter(|(_, p)| p.due <= now)
+        .map(|(k, _)| k.clone())
+        .collect();
+    let mut any = false;
+    for path in due {
+        if let Some(p) = o.pending.remove(&path) {
+            any |= save(o, &path, p, emit);
+        }
+    }
+    if any {
+        // Refresh counts now rather than waiting for the watcher, which
+        // will then find nothing new.
+        match o.index.sync(&o.vault) {
+            Ok(_) => emit(Event::Files(Arc::new(file_infos(o)))),
+            Err(e) => emit(Event::Error(e.to_string())),
+        }
+    }
+}
+
+/// Writes one save; true when the file changed.
+fn save(o: &mut Open, path: &str, p: Pending, emit: &mut dyn FnMut(Event)) -> bool {
+    let disk = match o.vault.revision(path) {
+        Ok(r) => r,
+        Err(e) => {
+            emit(Event::Error(format!("{path}: {e}")));
+            return false;
+        }
+    };
+    // A base we superseded ourselves still counts while the disk is at our
+    // last write.
+    let chain = o.written.get(path);
+    let ours = chain.is_some_and(|c| c.last() == Some(&disk) && c.contains(&p.base));
+    let expected = if ours { disk } else { p.base };
+    match o.vault.write(path, &p.text, expected) {
+        Ok(revision) => {
+            let chain = o.written.entry(path.to_string()).or_default();
+            if !ours {
+                chain.clear();
+                chain.push(p.base);
+            }
+            chain.push(Some(revision));
+            emit(Event::Saved {
+                path: path.to_string(),
+                text: p.text,
+                revision,
+            });
+            true
+        }
+        Err(WriteError::Stale { .. }) => {
+            o.written.remove(path);
+            let disk = match o.vault.document(path) {
+                Ok(d) => Some(d),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    emit(Event::Error(format!("{path}: {e}")));
+                    return false;
+                }
+            };
+            emit(Event::Stale {
+                path: path.to_string(),
+                disk,
+            });
+            false
+        }
+        Err(e) => {
+            emit(Event::Error(format!("Couldn't save {path}: {e}")));
+            false
+        }
+    }
 }
 
 fn emit_document(o: &Open, path: &str, emit: &mut dyn FnMut(Event)) {
     match o.vault.document(path) {
-        Ok((doc, _)) => emit(Event::Document(path.to_string(), doc)),
+        Ok((doc, rev)) => emit(Event::Document(path.to_string(), doc, rev)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             emit(Event::Missing(path.to_string()));
         }
@@ -323,7 +499,7 @@ mod tests {
         );
         h.send(Request::Load("a.org".into()));
         let doc = h.wait(|e| match e {
-            Event::Document(p, d) if p == "a.org" => Some(d),
+            Event::Document(p, d, _) if p == "a.org" => Some(d),
             _ => None,
         });
         assert_eq!(doc.headings().len(), 2);
@@ -331,13 +507,106 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
         fs::write(vault.join("a.org"), "* TODO one\n* two\n* added by emacs\n").unwrap();
         let doc = h.wait(|e| match e {
-            Event::Document(p, d) if p == "a.org" => Some(d),
+            Event::Document(p, d, _) if p == "a.org" => Some(d),
             _ => None,
         });
         assert_eq!(doc.headings().len(), 3);
         // And deletes it.
         fs::remove_file(vault.join("a.org")).unwrap();
         h.wait(|e| matches!(e, Event::Missing(p) if p == "a.org").then_some(()));
+    }
+
+    fn opened(dir: &std::path::Path, files: &[(&str, &str)]) -> (Harness, PathBuf) {
+        let vault = dir.join("v");
+        fs::create_dir_all(&vault).unwrap();
+        for (p, t) in files {
+            fs::write(vault.join(p), t).unwrap();
+        }
+        let h = Harness::start();
+        h.send(Request::Open(OpenVault {
+            root: vault.clone(),
+            keywords: Keywords::default(),
+            ignore: vec![],
+            index_dir: Some(dir.join("index")),
+        }));
+        h.wait(|e| matches!(e, Event::Files(_)).then_some(()));
+        (h, vault)
+    }
+
+    fn save(h: &Harness, path: &str, text: &str, base: Option<Revision>) {
+        h.send(Request::Save {
+            path: path.into(),
+            text: Arc::new(text.into()),
+            base,
+        });
+    }
+
+    #[test]
+    fn saves_are_debounced_and_chained() {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, vault) = opened(dir.path(), &[("a.org", "* one\n")]);
+        h.send(Request::Load("a.org".into()));
+        let base = h.wait(|e| match e {
+            Event::Document(_, _, r) => Some(r),
+            _ => None,
+        });
+        // Two quick saves: only the last is written.
+        save(&h, "a.org", "* one\nx\n", Some(base));
+        save(&h, "a.org", "* one\nxy\n", Some(base));
+        let (text, rev) = h.wait(|e| match e {
+            Event::Saved { text, revision, .. } => Some((text, revision)),
+            _ => None,
+        });
+        assert_eq!(text.as_str(), "* one\nxy\n");
+        assert_eq!(
+            fs::read_to_string(vault.join("a.org")).unwrap(),
+            "* one\nxy\n"
+        );
+        // A save still based on the old revision (the UI hadn't heard of the
+        // write yet) is not stale.
+        save(&h, "a.org", "* one\nxyz\n", Some(base));
+        h.send(Request::Flush);
+        let mut saved = None;
+        h.wait(|e| match e {
+            Event::Saved { revision, .. } => {
+                saved = Some(revision);
+                None
+            }
+            Event::Stale { .. } => panic!("not stale"),
+            Event::Flushed => Some(()),
+            _ => None,
+        });
+        assert!(saved.is_some_and(|r| r != rev));
+        assert_eq!(
+            fs::read_to_string(vault.join("a.org")).unwrap(),
+            "* one\nxyz\n"
+        );
+    }
+
+    #[test]
+    fn outside_change_makes_a_save_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, vault) = opened(dir.path(), &[("a.org", "* one\n")]);
+        h.send(Request::Load("a.org".into()));
+        let base = h.wait(|e| match e {
+            Event::Document(_, _, r) => Some(r),
+            _ => None,
+        });
+        thread::sleep(Duration::from_millis(20));
+        fs::write(vault.join("a.org"), "* one\n* from emacs\n").unwrap();
+        save(&h, "a.org", "* mine\n", Some(base));
+        h.send(Request::Flush);
+        let disk = h.wait(|e| match e {
+            Event::Stale { disk, .. } => Some(disk),
+            Event::Saved { .. } => panic!("must not overwrite"),
+            _ => None,
+        });
+        let (doc, _) = disk.unwrap();
+        assert_eq!(doc.text(), "* one\n* from emacs\n");
+        assert_eq!(
+            fs::read_to_string(vault.join("a.org")).unwrap(),
+            "* one\n* from emacs\n"
+        );
     }
 
     #[test]
