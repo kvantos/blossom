@@ -7,6 +7,7 @@
 //! stale-write guard, so a change made by another program (Emacs, Syncthing,
 //! git) is never silently overwritten. Paths are vault-relative with `/`.
 
+pub mod config;
 mod conflict;
 mod ignore;
 mod watch;

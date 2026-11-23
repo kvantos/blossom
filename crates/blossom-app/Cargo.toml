@@ -1,0 +1,24 @@
+[package]
+name = "blossom-app"
+description = "The Blossom desktop app (iced)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "blossom"
+path = "src/main.rs"
+
+[dependencies]
+blossom-core.workspace = true
+blossom-index.workspace = true
+blossom-vault.workspace = true
+chrono = { workspace = true, features = ["clock"] }
+iced.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

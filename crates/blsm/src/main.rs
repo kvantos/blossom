@@ -3,7 +3,6 @@
 //! Every command first brings the search index up to date with the vault
 //! (only changed files are re-read), so results always reflect the files.
 
-mod config;
 mod output;
 
 use std::error::Error;
@@ -11,13 +10,13 @@ use std::fmt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use blossom_core::{EditError, InsertAt, Keywords, NewHeading};
+use blossom_core::{EditError, InsertAt, NewHeading};
 use blossom_index::{MatchContext, NoteIndex, Query, SyncReport, agenda};
 use blossom_vault::{Vault, WriteError};
 use chrono::NaiveDateTime;
 use clap::{Parser, Subcommand};
 
-use crate::config::Config;
+use blossom_vault::config::{self, Config};
 
 /// Search, agenda and capture for a folder of org files.
 #[derive(Parser, Debug)]
@@ -147,10 +146,7 @@ fn open(cli: &Cli, rebuild: bool) -> Result<Session, Box<dyn Error>> {
                 config_path.map_or_else(|| "the config file".into(), |p| p.display().to_string())
             ))
         })?;
-    let keywords = config
-        .keywords
-        .as_deref()
-        .map_or_else(Keywords::default, Keywords::parse);
+    let keywords = config.keywords();
     let vault = Vault::open(&root, keywords.clone(), &config.ignore)
         .map_err(|e| fail(format!("vault {}: {e}", root.display())))?;
     let index_dir = cli

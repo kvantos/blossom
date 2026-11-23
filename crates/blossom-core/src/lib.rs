@@ -8,6 +8,7 @@
 mod document;
 pub mod edit;
 mod keywords;
+pub mod render;
 mod text;
 mod timestamp;
 

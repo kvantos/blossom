@@ -70,7 +70,7 @@ Notes from Phase 1:
 - Edits splice the smallest range (e.g. only the keyword), not a re-rendered heading line as Bloom does, so Emacs tag alignment survives. New lines use the file's line ending; a file without a final newline keeps it that way.
 - Dates use the `chrono` crate (pure; `now` is always passed in).
 - Departures from Bloom: `Keywords` without `|` makes the last keyword done-type (Emacs rule); timestamps are written with English day names regardless of locale (any day name is read).
-- `Document::org()` exposes the orgize tree read-only, for tests and later rendering; revisit when Phase 3 decides what the GUI needs.
+- `Document::org()` exposes the orgize tree read-only; only tests use it now (the GUI uses `blossom_core::render`).
 - Agenda occurrence logic (`occurrenceCovering`) was added in Phase 2; warning days are left for Phase 5.
 
 ## Phase 2: `blossom-vault` + `blossom-index` + `blsm`
@@ -92,13 +92,22 @@ Notes from Phase 2:
 - New dependencies: tantivy 0.27, notify 9, clap 4, serde/serde_json, toml 1, directories 6; tempfile for tests.
 
 ## Phase 3: `blossom-app` shell (iced)
-- [ ] Notebooks tree, outline with chips, read view.
-- [ ] Background worker owning vault and index (Task/Subscription); watcher refreshes views.
-- [ ] Light/dark following system.
+- [x] Notebooks tree, outline with chips, read view.
+- [x] Background worker owning vault and index (Task/Subscription); watcher refreshes views.
+- [x] Light/dark following system.
+
+Notes from Phase 3:
+- `blossom [VAULT]` opens VAULT or `vault` from the shared config (now `blossom_vault::config`, used by `blsm` too); otherwise a welcome screen takes a folder path. No native folder picker yet; it is planned for Phase 4.
+- The worker is one thread owning `Vault`, `NoteIndex` and the watcher; the UI talks to it through `worker::Handle` requests and receives `worker::Event`s via `Subscription::run`. Outside edits re-sync the index, refresh the file list and reload the open file, keeping the selection where possible.
+- Read view uses `blossom_core::render` (blocks of styled spans built from orgize's tree), so the app never touches orgize. Checkboxes are shown read-only; toggling is Phase 4.
+- Light/dark: `iced::system::theme()` / `theme_changes()` pick Blossom's own light or dark palette.
+- Links: http(s)/mailto open with the system opener; `file:` links to vault `.org` files open in the app; others (`id:`, images) show "not supported yet".
+- Dev hook `BLOSSOM_SCREENSHOT=out.png` (+ `_FILE`, `_HEADING`, `BLOSSOM_THEME`) saves a window screenshot and exits, for checking the UI without a screenshot tool.
 
 ## Phase 4: editing
 - [ ] `text_editor` with org highlighter; per-heading section editing.
 - [ ] Metadata panel, list continuation, autosave with stale guard, undo.
+- [ ] Native folder picker (e.g. `rfd`) on the welcome screen and as an "Open vault…" action.
 
 ## Phase 5: agenda, capture, refile, archive
 - [ ] Agenda rules from Bloom (one day per item: scheduled else deadline; bare timestamps are events; due soon; repeats ahead).

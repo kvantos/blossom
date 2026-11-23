@@ -6,6 +6,7 @@ members = [
     "crates/blossom-vault",
     "crates/blossom-index",
     "crates/blsm",
+    "crates/blossom-app",
 ]
 
 [workspace.package]
@@ -22,6 +23,7 @@ blossom-index = { path = "crates/blossom-index" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4.6", features = ["derive"] }
 directories = "6"
+iced = "0.14"
 notify = "9"
 proptest = "1"
 serde = { version = "1", features = ["derive"] }

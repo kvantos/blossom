@@ -1,4 +1,4 @@
-//! `~/.config/blossom/config.toml`.
+//! `~/.config/blossom/config.toml`, shared by `blsm` and the app.
 
 use std::fs;
 use std::io;
@@ -23,7 +23,22 @@ pub struct Config {
 }
 
 impl Config {
+    /// The configured TODO keywords, or the default.
+    #[must_use]
+    pub fn keywords(&self) -> blossom_core::Keywords {
+        self.keywords.as_deref().map_or_else(
+            blossom_core::Keywords::default,
+            blossom_core::Keywords::parse,
+        )
+    }
+}
+
+impl Config {
     /// Reads `path`; a missing file is an empty config.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the file when it can't be read or parsed.
     pub fn load(path: &Path) -> Result<Config, String> {
         match fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
@@ -35,6 +50,7 @@ impl Config {
 
 /// `$XDG_CONFIG_HOME/blossom/config.toml`, else `~/.config/blossom/config.toml`
 /// (on macOS too, as is usual for command-line tools).
+#[must_use]
 pub fn default_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -48,6 +64,7 @@ fn home() -> Option<PathBuf> {
 }
 
 /// Expands a leading `~/`.
+#[must_use]
 pub fn expand(path: &str) -> PathBuf {
     match (path.strip_prefix("~/"), home()) {
         (Some(rest), Some(h)) => h.join(rest),
@@ -58,6 +75,7 @@ pub fn expand(path: &str) -> PathBuf {
 
 /// The index folder for a vault: under the platform cache folder, one per
 /// vault, named after the folder plus a stable hash of its full path.
+#[must_use]
 pub fn index_dir(vault: &Path) -> Option<PathBuf> {
     let dirs = directories::ProjectDirs::from("", "", "blossom")?;
     let full = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf());
