@@ -7,6 +7,7 @@
 //! candidates; [`matcher`] decides every result, so results are the same
 //! with or without narrowing.
 
+pub mod agenda;
 pub mod matcher;
 pub mod query;
 mod record;

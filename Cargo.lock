@@ -456,6 +456,7 @@ name = "blossom-vault"
 version = "0.1.0"
 dependencies = [
  "blossom-core",
+ "chrono",
  "directories",
  "notify",
  "serde",

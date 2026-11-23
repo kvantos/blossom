@@ -3,10 +3,12 @@
 //! `blossom [VAULT]` opens `VAULT`, or the `vault` from
 //! `~/.config/blossom/config.toml`, or a welcome screen to choose one.
 
+mod agenda;
 mod app;
 mod editor;
 mod file;
 mod outline;
+mod panels;
 mod read;
 mod shot;
 mod style;
@@ -36,12 +38,7 @@ fn main() -> iced::Result {
         }
         None => Config::default(),
     };
-    let template = OpenVault {
-        root: PathBuf::new(),
-        keywords: config.keywords(),
-        ignore: config.ignore.clone(),
-        index_dir: None,
-    };
+    let template = OpenVault::new(PathBuf::new(), &config);
     let root = arg.or_else(|| config.vault.as_deref().map(config::expand));
     let open = root.map(|root| OpenVault {
         root,

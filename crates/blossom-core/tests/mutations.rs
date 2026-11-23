@@ -6,7 +6,7 @@
 
 mod common;
 
-use blossom_core::{Document, EditError, InsertAt, Keywords, NewHeading, Timestamp};
+use blossom_core::{Document, EditError, EventStamp, InsertAt, Keywords, NewHeading, Timestamp};
 use chrono::{NaiveDate, NaiveDateTime};
 
 fn kw() -> Keywords {
@@ -36,6 +36,43 @@ fn edit(input: &str, f: impl FnOnce(&mut Document) -> Result<(), EditError>) -> 
 }
 
 const LOG: &str = "- State \"DONE\"       from \"TODO\"       [2026-11-23 Mon 10:00]";
+
+// --- events ---
+
+#[test]
+fn advance_event_moves_only_that_stamp() {
+    let text = "* Bins\nSCHEDULED: <2026-11-20 Fri +1w> DEADLINE: <2026-11-21 Sat>\n<2026-11-10 Tue +2w> and <2026-11-10 Tue>\n";
+    assert_eq!(
+        edit(text, |d| d.advance_event(0, EventStamp::Scheduled, now())),
+        "* Bins\nSCHEDULED: <2026-11-27 Fri +1w> DEADLINE: <2026-11-21 Sat>\n<2026-11-10 Tue +2w> and <2026-11-10 Tue>\n"
+    );
+    let day = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+    assert_eq!(
+        edit(text, |d| d.advance_event(0, EventStamp::Active(day), now())),
+        "* Bins\nSCHEDULED: <2026-11-20 Fri +1w> DEADLINE: <2026-11-21 Sat>\n<2026-11-24 Tue +2w> and <2026-11-10 Tue>\n"
+    );
+    let mut d = doc(text);
+    assert_eq!(
+        d.advance_event(0, EventStamp::Deadline, now()),
+        Err(EditError::NotRepeating)
+    );
+    let other = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+    assert_eq!(
+        d.advance_event(0, EventStamp::Active(other), now()),
+        Err(EditError::NotRepeating)
+    );
+    assert_eq!(d.text(), text);
+    let w = |s: &str| ts(s).warning.unwrap().days();
+    assert_eq!(
+        [
+            w("<2026-11-01 Sun -3d>"),
+            w("<2026-11-01 Sun -2w>"),
+            w("<2026-11-01 Sun -1m>"),
+            w("<2026-11-01 Sun -30h>")
+        ],
+        [3, 14, 30, 1]
+    );
+}
 
 // --- heading line ---
 

@@ -203,3 +203,161 @@ fn watcher_batches_changes() {
     }
     assert!(!seen.iter().any(|p| p.contains(".stversions")), "{seen:?}");
 }
+
+// --- operations ---
+
+mod ops {
+    use super::*;
+    use blossom_core::EventStamp;
+    use blossom_core::capture::Target;
+    use blossom_vault::ops::{Complete, HeadingRef, OpError};
+    use chrono::{NaiveDate, NaiveDateTime};
+
+    fn now() -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 11, 23)
+            .unwrap()
+            .and_hms_opt(9, 30, 0)
+            .unwrap()
+    }
+
+    fn h(path: &str, index: usize, title: &str) -> HeadingRef {
+        HeadingRef {
+            path: path.into(),
+            index,
+            title: title.into(),
+        }
+    }
+
+    fn read(r: &Path, p: &str) -> String {
+        fs::read_to_string(r.join(p)).unwrap()
+    }
+
+    #[test]
+    fn archive_to_a_new_file_and_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        put(r, "a.org", "* Proj\n** DONE Task\nbody\n* Next\n");
+        let v = vault(r);
+        let out = v
+            .archive(&h("a.org", 1, "Task"), "%s_archive::", now())
+            .unwrap();
+        assert_eq!(out.path, "a.org_archive");
+        assert_eq!(out.message, "Archived to a.org_archive");
+        assert_eq!(read(r, "a.org"), "* Proj\n* Next\n");
+        let full = r.join("a.org").display().to_string();
+        assert_eq!(
+            read(r, "a.org_archive"),
+            format!(
+                "* DONE Task\n:PROPERTIES:\n:ARCHIVE_TIME: 2026-11-23 Mon 09:30\n:ARCHIVE_FILE: {full}\n:ARCHIVE_OLPATH: Proj\n:ARCHIVE_CATEGORY: a\n:ARCHIVE_TODO: DONE\n:END:\nbody\n"
+            )
+        );
+        v.restore(&out.changes).unwrap();
+        assert_eq!(read(r, "a.org"), "* Proj\n** DONE Task\nbody\n* Next\n");
+        assert!(!r.join("a.org_archive").exists());
+        // A stale reference is refused.
+        assert!(matches!(
+            v.archive(&h("a.org", 1, "Other"), "%s_archive::", now()),
+            Err(OpError::Moved)
+        ));
+    }
+
+    #[test]
+    fn archive_under_a_heading_in_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        put(r, "a.org", "#+ARCHIVE: ::* Archive\n* DONE x\n* y\n");
+        let v = vault(r);
+        let out = v
+            .archive(&h("a.org", 0, "x"), "%s_archive::", now())
+            .unwrap();
+        assert_eq!(out.changes.len(), 1);
+        let text = read(r, "a.org");
+        assert!(
+            text.starts_with("#+ARCHIVE: ::* Archive\n* y\n* Archive\n** DONE x\n:PROPERTIES:\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn refile_across_files_undo_refuses_after_outside_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        put(r, "a.org", "* move me\n** child\n* stay\n");
+        put(r, "b.org", "* Target\n* Other\n");
+        let v = vault(r);
+        let out = v
+            .refile(
+                &h("a.org", 0, "move me"),
+                "b.org",
+                Some(&h("b.org", 0, "Target")),
+            )
+            .unwrap();
+        assert_eq!(
+            (out.path.as_str(), out.heading, out.line),
+            ("b.org", Some(1), 2)
+        );
+        assert_eq!(read(r, "a.org"), "* stay\n");
+        assert_eq!(
+            read(r, "b.org"),
+            "* Target\n** move me\n*** child\n* Other\n"
+        );
+        // Same file, to the end.
+        let back = v.refile(&h("b.org", 1, "move me"), "b.org", None).unwrap();
+        assert_eq!(read(r, "b.org"), "* Target\n* Other\n* move me\n** child\n");
+        std::thread::sleep(Duration::from_millis(20));
+        put(r, "b.org", "* changed by emacs\n");
+        assert!(matches!(v.restore(&back.changes), Err(OpError::Changed(p)) if p == "b.org"));
+        assert_eq!(read(r, "b.org"), "* changed by emacs\n");
+    }
+
+    #[test]
+    fn complete_and_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        put(r, "a.org", "* TODO task\n* bins\n<2026-11-20 Fri +1w>\n");
+        let v = vault(r);
+        let out = v
+            .complete(&h("a.org", 0, "task"), Complete::Toggle, now())
+            .unwrap();
+        assert_eq!(out.message, "Marked DONE");
+        assert!(read(r, "a.org").starts_with("* DONE task\nCLOSED: [2026-11-23 Mon 09:30]\n"));
+        let out = v
+            .complete(&h("a.org", 0, "task"), Complete::Toggle, now())
+            .unwrap();
+        assert_eq!(out.message, "Reopened");
+        let day = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        v.complete(
+            &h("a.org", 1, "bins"),
+            Complete::Advance(EventStamp::Active(day)),
+            now(),
+        )
+        .unwrap();
+        assert!(read(r, "a.org").ends_with("* bins\n<2026-11-27 Fri +1w>\n"));
+        assert!(
+            v.complete(&h("a.org", 1, "bins"), Complete::Toggle, now())
+                .is_err()
+        );
+
+        let out = v
+            .capture(
+                "new/journal.org",
+                &Target::Bottom,
+                "* hello\nbody",
+                now().date(),
+            )
+            .unwrap();
+        assert_eq!((out.heading, out.line), (Some(0), 1));
+        assert_eq!(read(r, "new/journal.org"), "* hello\nbody\n");
+        v.restore(&out.changes).unwrap();
+        assert!(!r.join("new/journal.org").exists());
+        let missing = Target::Heading {
+            id: None,
+            path: vec!["Nope".into()],
+            first: false,
+        };
+        assert!(matches!(
+            v.capture("a.org", &missing, "x", now().date()),
+            Err(OpError::Capture(_))
+        ));
+    }
+}

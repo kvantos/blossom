@@ -154,6 +154,26 @@ pub fn bindings<M>(on: fn(Command) -> M) -> impl Fn(KeyPress) -> Option<Binding<
     }
 }
 
+/// The capture editor's bindings: iced's defaults, Ctrl/Cmd+Enter to save
+/// and Escape to cancel.
+pub fn capture_bindings<M: Clone>(save: M, cancel: M) -> impl Fn(KeyPress) -> Option<Binding<M>> {
+    move |press: KeyPress| {
+        if !matches!(
+            press.status,
+            iced::widget::text_editor::Status::Focused { .. }
+        ) {
+            return None;
+        }
+        match press.key.as_ref() {
+            Key::Named(key::Named::Enter) if press.modifiers.command() => {
+                Some(Binding::Custom(save.clone()))
+            }
+            Key::Named(key::Named::Escape) => Some(Binding::Custom(cancel.clone())),
+            _ => Binding::from_key_press(press),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

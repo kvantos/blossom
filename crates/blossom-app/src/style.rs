@@ -196,3 +196,32 @@ pub fn banner(theme: &Theme) -> container::Style {
         ..container::Style::default()
     }
 }
+
+/// A raised panel (capture, refile).
+pub fn modal(theme: &Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(p.background.base.color)),
+        text_color: Some(p.background.base.text),
+        border: Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: p.background.strong.color,
+        },
+        shadow: iced::Shadow {
+            color: Color::BLACK.scale_alpha(0.3),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 18.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The bar that reports an operation, with its Undo.
+pub fn notice(theme: &Theme) -> container::Style {
+    let p = theme.palette();
+    container::Style {
+        background: Some(Background::Color(mix(p.background, p.primary, 0.15))),
+        ..container::Style::default()
+    }
+}

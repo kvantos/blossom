@@ -5,8 +5,11 @@ use std::error::Error;
 use std::fmt::Write as _;
 use std::io::{self, Write};
 
+use blossom_index::agenda::{Agenda, Entry, Placement};
 use blossom_index::{AgendaDay, AgendaReason, Note, SyncReport};
 use blossom_vault::Listing;
+use blossom_vault::ops::Outcome;
+use chrono::NaiveDate;
 use serde::Serialize;
 use serde_json::json;
 
@@ -147,6 +150,81 @@ pub fn agenda(days: &[AgendaDay], json: bool) -> Out {
             )?;
         }
     }
+    Ok(())
+}
+
+/// The label column of an agenda row.
+fn placement_label(e: &Entry, today: NaiveDate) -> String {
+    match e.placement {
+        Placement::Scheduled => "scheduled".into(),
+        Placement::Deadline => "deadline".into(),
+        Placement::Event => "event".into(),
+        Placement::ScheduledRepeat | Placement::DeadlineRepeat => "repeat".into(),
+        Placement::DueSoon => format!("in {}d", (e.stamp.date - today).num_days()),
+    }
+}
+
+fn entry_json(e: &Entry) -> serde_json::Value {
+    json!({
+        "placement": e.placement.name(),
+        "time": e.time().map(|t| t.format("%H:%M").to_string()),
+        "stamp": e.stamp.format(),
+        "note": note_json(&e.note),
+    })
+}
+
+/// `blsm agenda`: Overdue, Due soon, then today and each later day with entries.
+pub fn agenda_view(a: &Agenda, today: NaiveDate, json: bool) -> Out {
+    if json {
+        return print_json(&json!({
+            "overdue": a.overdue.iter().map(entry_json).collect::<Vec<_>>(),
+            "due_soon": a.due_soon.iter().map(entry_json).collect::<Vec<_>>(),
+            "days": a.days.iter().map(|d| json!({
+                "date": d.date.to_string(),
+                "items": d.entries.iter().map(entry_json).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        }));
+    }
+    let mut sections: Vec<(String, &[Entry])> = Vec::new();
+    if !a.overdue.is_empty() {
+        sections.push(("Overdue".into(), &a.overdue));
+    }
+    if !a.due_soon.is_empty() {
+        sections.push(("Due soon".into(), &a.due_soon));
+    }
+    for d in &a.days {
+        sections.push((d.date.format("%a %Y-%m-%d").to_string(), &d.entries));
+    }
+    let mut out = io::stdout().lock();
+    for (n, (title, entries)) in sections.iter().enumerate() {
+        if n > 0 {
+            writeln!(out)?;
+        }
+        writeln!(out, "{title}")?;
+        for e in *entries {
+            let time = e
+                .time()
+                .map_or_else(|| "     ".to_string(), |t| t.format("%H:%M").to_string());
+            let r = &e.note.record;
+            writeln!(
+                out,
+                "  {time}  {:<9}  {}  ({}:{})",
+                placement_label(e, today),
+                heading_text(&e.note),
+                r.path,
+                r.line
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Where `blsm archive` / `blsm refile` put the heading.
+pub fn moved(o: &Outcome, json: bool) -> Out {
+    if json {
+        return print_json(&json!({"path": o.path, "line": o.line, "message": o.message}));
+    }
+    println!("{}:{}", o.path, o.line);
     Ok(())
 }
 

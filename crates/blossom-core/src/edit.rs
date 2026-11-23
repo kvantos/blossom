@@ -9,7 +9,7 @@
 use std::fmt;
 use std::ops::Range;
 
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime};
 
 use crate::document::{
     Document, Heading, PlanningKind, is_planning_line, parse_property, planning_parts,
@@ -44,6 +44,8 @@ pub enum EditError {
     TargetInsideSubtree,
     /// Text to insert as a subtree must start with a heading line.
     NotASubtree,
+    /// The timestamp to advance doesn't exist or doesn't repeat.
+    NotRepeating,
 }
 
 impl fmt::Display for EditError {
@@ -65,6 +67,7 @@ impl fmt::Display for EditError {
             }
             EditError::TargetInsideSubtree => f.write_str("can't refile a subtree under itself"),
             EditError::NotASubtree => f.write_str("text does not start with a heading"),
+            EditError::NotRepeating => f.write_str("that timestamp doesn't repeat"),
         }
     }
 }
@@ -87,6 +90,18 @@ pub enum InsertAt {
     FirstTopLevel,
     /// Level 1, at the end of the file.
     LastTopLevel,
+}
+
+/// One repeating timestamp of an event (a heading without a keyword), for
+/// [`Document::advance_event`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventStamp {
+    /// Its `SCHEDULED:`.
+    Scheduled,
+    /// Its `DEADLINE:`.
+    Deadline,
+    /// The active timestamp in its own section (dedicated line or body) on this date.
+    Active(NaiveDate),
 }
 
 /// A heading to insert.
@@ -405,6 +420,55 @@ impl Document {
             .or_else(|| h.keyword.clone())
     }
 
+    /// Moves one repeating timestamp of an event to its next occurrence, as
+    /// Bloom's agenda does for a heading without a keyword: nothing else
+    /// changes (no keyword, logbook or `LAST_REPEAT`).
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NoSuchHeading`], or [`EditError::NotRepeating`] when that
+    /// timestamp is missing or doesn't repeat.
+    pub fn advance_event(
+        &mut self,
+        index: usize,
+        which: EventStamp,
+        now: NaiveDateTime,
+    ) -> Result<(), EditError> {
+        let h = self.get(index)?;
+        let planned = |ts: &Option<Timestamp>| {
+            ts.as_ref()
+                .filter(|t| t.repeats())
+                .map(|t| t.advance(now).format())
+                .ok_or(EditError::NotRepeating)
+        };
+        match which {
+            EventStamp::Scheduled => {
+                let v = planned(&h.planning.scheduled)?;
+                self.write_planning(index, &[(PlanningKind::Scheduled, Some(v))])
+            }
+            EventStamp::Deadline => {
+                let v = planned(&h.planning.deadline)?;
+                self.write_planning(index, &[(PlanningKind::Deadline, Some(v))])
+            }
+            EventStamp::Active(date) => {
+                let start = h.spans.line.end.min(h.spans.section_end);
+                let planning = h.spans.planning.clone().unwrap_or(0..0);
+                let found = Timestamp::scan(&self.text()[start..h.spans.section_end])
+                    .into_iter()
+                    .map(|(r, ts)| (start + r.start..start + r.end, ts))
+                    .find(|(r, ts)| {
+                        ts.active
+                            && ts.repeats()
+                            && ts.date == date
+                            && !(planning.start <= r.start && r.end <= planning.end)
+                    });
+                let (r, ts) = found.ok_or(EditError::NotRepeating)?;
+                self.replace_range(r, &ts.advance(now).format());
+                Ok(())
+            }
+        }
+    }
+
     // --- drawers ---
 
     /// Sets property `key` in the heading's `:PROPERTIES:` drawer, replacing
@@ -698,11 +762,7 @@ impl Document {
                 return Err(EditError::TargetInsideSubtree);
             }
         }
-        let mut subtree = self.subtree_text(index).to_string();
-        if !subtree.ends_with('\n') {
-            subtree.push_str(text::eol(self.text()));
-        }
-        self.delete_subtree(index)?;
+        let subtree = self.take_subtree(index)?;
         let count = descendants.len() + 1;
         let at = match target {
             Some(t) if t > index => InsertAt::LastChild(t - count),
@@ -840,7 +900,7 @@ impl Document {
 
     /// Inserts `lines` as whole lines at `at` (a line start or the end).
     /// Returns where the first inserted line starts.
-    fn insert_lines(&mut self, at: usize, lines: &[String]) -> usize {
+    pub(crate) fn insert_lines(&mut self, at: usize, lines: &[String]) -> usize {
         let block = text::lines_block(self.text(), at, lines);
         let start = if block.starts_with(['\r', '\n']) {
             at + text::eol(self.text()).len()

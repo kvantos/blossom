@@ -122,9 +122,19 @@ Notes from Phase 4:
 - Screenshot hook: `BLOSSOM_SCREENSHOT_EDIT=1` opens the editor first. The GPU renderer's window screenshot leaves the editor's text out, so capture the editor with `ICED_BACKEND=tiny-skia`.
 
 ## Phase 5: agenda, capture, refile, archive
-- [ ] Agenda rules from Bloom (one day per item: scheduled else deadline; bare timestamps are events; due soon; repeats ahead).
-- [ ] Capture templates (`%U %t %^{prompt} %?`; file top/bottom, under heading, date tree).
-- [ ] Refile and archive with undo.
+- [x] Agenda rules from Bloom (one day per item: scheduled else deadline; bare timestamps are events; due soon; repeats ahead).
+- [x] Capture templates (`%U %t %^{prompt} %?`; file top/bottom, under heading, date tree).
+- [x] Refile and archive with undo.
+
+Notes from Phase 5:
+- Agenda (`blossom_index::agenda`, ported from Bloom's `AgendaBuckets` and `dateGroups`): Overdue (past SCHEDULED, else DEADLINE), Due soon (DEADLINE after today within its `-Nd`, else `deadline_warning_days`, default 14), then today and each later day of the window. One day per planned heading; events (bare active stamps) on every day they cover and every repeat; repeating SCHEDULED/DEADLINE previewed on later repeats; SCHEDULED delay `-Nd` hides the plan (and its repeats; `--Nd` only the first). Kept Bloom's quirks: a heading with both dates also shows under Due soon; a delayed heading previews no repeats. `Entry::completion` says what its box does: a task is marked done (repeating if anything repeats), an event with a repeater advances only the stamp that placed it (`Document::advance_event`, new), a plain event has no box.
+- `blsm agenda` uses the new layout (sections Overdue / Due soon / days; JSON `{overdue, due_soon, days}`); `blsm search ad.N` keeps Bloom's search agenda as before.
+- Capture (`blossom_core::capture`, from Bloom's `PlaceholderExpander`/`CaptureInserter`): `%t %T %u %U %^{prompt} %? %cursor %date %time %year %month %day %clipboard %(id) %%`; targets top, bottom, under a heading (by `:ID:`/`:CUSTOM_ID:`, else outline path; first or last child; a non-heading entry joins the heading's body), date tree (day/week/month, matched by date part, inside a heading or at top level). Entries are re-levelled like org-capture. English month/day names, as in timestamps.
+- Templates are `[[capture]]` tables in `config.toml` (`key name file target heading id first tree template`); without any, three built-ins: `n` Note and `t` TODO at the bottom of the inbox, `j` Journal in a date tree of `journal.org` (Bloom puts its TODO template in `tasks.org`). `blsm capture -t KEY [--set PROMPT=TEXT] TEXT` (TEXT goes where `%?` is).
+- Archive (`blossom_core::archive`, from Bloom's `ArchiveLocation`/`ArchiveProperties`): nearest `:ARCHIVE:` property, file drawer, `#+ARCHIVE:`, then config `archive` (default Emacs's `%s_archive::`, so `a.org` archives to `a.org_archive`, which the vault doesn't list, as in Emacs). Missing heading path is created; `ARCHIVE_TIME/FILE/OLPATH/CATEGORY/TODO` are stamped. No auto-archive on done yet.
+- `blossom_vault::ops`: capture, complete, refile, archive and `restore` (undo), shared by `blsm` and the app. Headings are named by index + title (a mismatch is refused as "moved"); the destination file is written before the source; undo restores only files still holding exactly what the operation wrote (a created file is deleted). New CLI: `blsm archive FILE:LINE`, `blsm refile FILE:LINE (FILE | FILE:LINE)`.
+- App: "Agenda" (Ctrl/Cmd+Shift+A) and "Capture…" (Ctrl/Cmd+N) in the sidebar; Refile… and Archive in the read view. Agenda boxes, capture, refile and archive run as worker `Op`s after writing waiting saves; the open file then adopts the new disk text. A notice bar reports the result with Undo. The capture panel and refile picker take the main area instead of floating: iced's `stack` layer dropped the text editor's text.
+- Screenshot hook: `BLOSSOM_SCREENSHOT_AGENDA=1`, `BLOSSOM_SCREENSHOT_CAPTURE=1`.
 
 ## Phase 6: images and diagrams
 - [ ] Inline `[[file:…png|jpg|svg]]` in read view.

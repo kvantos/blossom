@@ -21,6 +21,10 @@ pub struct Plan {
     pub mode: Option<iced::theme::Mode>,
     /// Open the section editor before capturing.
     pub edit: bool,
+    /// Show the agenda instead of a file.
+    pub agenda: bool,
+    /// Open the capture panel before capturing.
+    pub capture: bool,
 }
 
 impl Plan {
@@ -40,6 +44,8 @@ impl Plan {
                 _ => None,
             },
             edit: std::env::var_os("BLOSSOM_SCREENSHOT_EDIT").is_some(),
+            agenda: std::env::var_os("BLOSSOM_SCREENSHOT_AGENDA").is_some(),
+            capture: std::env::var_os("BLOSSOM_SCREENSHOT_CAPTURE").is_some(),
         })
     }
 }

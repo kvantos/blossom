@@ -10,6 +10,7 @@
 pub mod config;
 mod conflict;
 mod ignore;
+pub mod ops;
 mod watch;
 
 use std::collections::HashMap;

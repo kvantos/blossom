@@ -4,6 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use blossom_core::capture::{Target, TreeType};
 use serde::Deserialize;
 
 /// The settings file. Every field is optional.
@@ -20,6 +21,53 @@ pub struct Config {
     pub inbox: Option<String>,
     /// Extra ignore globs, as in `.blsmignore`.
     pub ignore: Vec<String>,
+    /// Days before a DEADLINE that the agenda lists it as due soon, when it
+    /// has no `-Nd` of its own (Emacs's `org-deadline-warning-days`). Default 14.
+    pub deadline_warning_days: Option<u32>,
+    /// Where headings are archived when the file doesn't say (Emacs's
+    /// `org-archive-location`). Default `%s_archive::`.
+    pub archive: Option<String>,
+    /// Capture templates; none means the built-in ones.
+    pub capture: Vec<CaptureConfig>,
+}
+
+/// One `[[capture]]` table.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CaptureConfig {
+    /// A short key, e.g. `t`, for `blsm capture -t t`.
+    pub key: String,
+    /// The name shown in the app.
+    pub name: String,
+    /// Vault-relative target file; default: `inbox`.
+    pub file: Option<String>,
+    /// `bottom` (default), `top`, `heading` or `datetree`.
+    pub target: Option<String>,
+    /// For `heading` and `datetree`: an outline path, `Projects/Blossom`.
+    pub heading: Option<String>,
+    /// For `heading` and `datetree`: an `:ID:` or `:CUSTOM_ID:` (tried before `heading`).
+    pub id: Option<String>,
+    /// For `heading`: insert as the first child instead of the last.
+    pub first: bool,
+    /// For `datetree`: `day` (default), `week` or `month`.
+    pub tree: Option<String>,
+    /// The template text, e.g. `* TODO %?`.
+    pub template: String,
+}
+
+/// A capture template ready to use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Template {
+    /// Short key.
+    pub key: String,
+    /// Display name.
+    pub name: String,
+    /// Vault-relative target file.
+    pub file: String,
+    /// Where in the file.
+    pub target: Target,
+    /// The template text.
+    pub template: String,
 }
 
 impl Config {
@@ -30,6 +78,130 @@ impl Config {
             blossom_core::Keywords::default,
             blossom_core::Keywords::parse,
         )
+    }
+}
+
+impl Config {
+    /// The inbox file: `inbox`, else `inbox.org`.
+    #[must_use]
+    pub fn inbox(&self) -> String {
+        self.inbox
+            .clone()
+            .unwrap_or_else(|| "inbox.org".to_string())
+    }
+
+    /// The deadline warning window in days.
+    #[must_use]
+    pub fn warning_days(&self) -> i64 {
+        i64::from(self.deadline_warning_days.unwrap_or(14))
+    }
+
+    /// The default archive location.
+    #[must_use]
+    pub fn archive_location(&self) -> &str {
+        self.archive
+            .as_deref()
+            .unwrap_or(blossom_core::archive::DEFAULT_LOCATION)
+    }
+
+    /// The capture templates, or the built-in ones (a note and a TODO at the
+    /// bottom of the inbox, a journal entry in a date tree of `journal.org`)
+    /// when none are configured.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the template with a bad `target` or `tree`, a
+    /// missing key or a repeated one.
+    pub fn templates(&self) -> Result<Vec<Template>, String> {
+        if self.capture.is_empty() {
+            let t = |key: &str, name: &str, file: String, target, template: &str| Template {
+                key: key.into(),
+                name: name.into(),
+                file,
+                target,
+                template: template.into(),
+            };
+            return Ok(vec![
+                t("n", "Note", self.inbox(), Target::Bottom, "* %?"),
+                t("t", "TODO", self.inbox(), Target::Bottom, "* TODO %?"),
+                t(
+                    "j",
+                    "Journal",
+                    "journal.org".into(),
+                    Target::Datetree {
+                        id: None,
+                        path: Vec::new(),
+                        tree: TreeType::Day,
+                    },
+                    "* %U %?",
+                ),
+            ]);
+        }
+        let mut out: Vec<Template> = Vec::new();
+        for c in &self.capture {
+            let who = if c.name.is_empty() { &c.key } else { &c.name };
+            if c.key.trim().is_empty() {
+                return Err(format!("capture template {who:?} has no key"));
+            }
+            if out.iter().any(|o| o.key == c.key) {
+                return Err(format!("two capture templates have the key {:?}", c.key));
+            }
+            let path: Vec<String> = c
+                .heading
+                .as_deref()
+                .unwrap_or("")
+                .split('/')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            let id = c.id.clone().filter(|i| !i.trim().is_empty());
+            let target = match c.target.as_deref().unwrap_or("bottom") {
+                "bottom" => Target::Bottom,
+                "top" => Target::Top,
+                "heading" if id.is_none() && path.is_empty() => {
+                    return Err(format!(
+                        "capture template {who:?}: target \"heading\" needs `heading` or `id`"
+                    ));
+                }
+                "heading" => Target::Heading {
+                    id,
+                    path,
+                    first: c.first,
+                },
+                "datetree" => Target::Datetree {
+                    id,
+                    path,
+                    tree: match c.tree.as_deref().unwrap_or("day") {
+                        "day" => TreeType::Day,
+                        "week" => TreeType::Week,
+                        "month" => TreeType::Month,
+                        other => {
+                            return Err(format!(
+                                "capture template {who:?}: unknown tree {other:?} (day, week or month)"
+                            ));
+                        }
+                    },
+                },
+                other => {
+                    return Err(format!(
+                        "capture template {who:?}: unknown target {other:?} (bottom, top, heading or datetree)"
+                    ));
+                }
+            };
+            out.push(Template {
+                key: c.key.clone(),
+                name: if c.name.is_empty() {
+                    c.key.clone()
+                } else {
+                    c.name.clone()
+                },
+                file: c.file.clone().unwrap_or_else(|| self.inbox()),
+                target,
+                template: c.template.clone(),
+            });
+        }
+        Ok(out)
     }
 }
 
@@ -120,6 +292,41 @@ mod tests {
         assert_eq!(c.vault.as_deref(), Some("~/org"));
         assert_eq!(c.ignore, ["a*"]);
         assert!(toml::from_str::<Config>("typo = 1").is_err());
+    }
+
+    #[test]
+    fn capture_templates() {
+        let c = Config::default();
+        let keys: Vec<String> = c.templates().unwrap().into_iter().map(|t| t.key).collect();
+        assert_eq!(keys, ["n", "t", "j"]);
+        let c: Config = toml::from_str(
+            "inbox = \"in.org\"\n[[capture]]\nkey = \"p\"\ntarget = \"heading\"\nheading = \"Projects / Blossom\"\ntemplate = \"* %?\"\n[[capture]]\nkey = \"w\"\nname = \"Week\"\nfile = \"j.org\"\ntarget = \"datetree\"\ntree = \"week\"\n",
+        )
+        .unwrap();
+        let t = c.templates().unwrap();
+        assert_eq!(t[0].file, "in.org");
+        assert_eq!(t[0].name, "p");
+        assert_eq!(
+            t[0].target,
+            Target::Heading {
+                id: None,
+                path: vec!["Projects".into(), "Blossom".into()],
+                first: false
+            }
+        );
+        assert!(matches!(
+            t[1].target,
+            Target::Datetree {
+                tree: TreeType::Week,
+                ..
+            }
+        ));
+        let bad: Config =
+            toml::from_str("[[capture]]\nkey = \"x\"\ntarget = \"middle\"\n").unwrap();
+        assert!(bad.templates().unwrap_err().contains("middle"));
+        let bad: Config =
+            toml::from_str("[[capture]]\nkey = \"x\"\ntarget = \"heading\"\n").unwrap();
+        assert!(bad.templates().is_err());
     }
 
     #[test]

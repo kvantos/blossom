@@ -18,8 +18,12 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use blossom_core::capture::Target;
 use blossom_core::{Document, Keywords};
 use blossom_index::NoteIndex;
+use blossom_index::agenda::{self, Agenda};
+use blossom_vault::config::Template;
+use blossom_vault::ops::{Change, Complete, HeadingRef, OpError, Outcome};
 use blossom_vault::{Revision, Vault, WriteError, config};
 use iced::futures::{SinkExt, StreamExt};
 use iced::{Subscription, futures};
@@ -43,6 +47,69 @@ pub struct OpenVault {
     pub ignore: Vec<String>,
     /// Index folder; `None` for the platform cache folder.
     pub index_dir: Option<PathBuf>,
+    /// Default archive location.
+    pub archive: String,
+    /// Deadline warning days for the agenda.
+    pub warning_days: i64,
+    /// Capture templates.
+    pub templates: Vec<Template>,
+}
+
+impl OpenVault {
+    /// Settings for `root`, the rest from `config`.
+    #[must_use]
+    pub fn new(root: PathBuf, config: &config::Config) -> OpenVault {
+        OpenVault {
+            root,
+            keywords: config.keywords(),
+            ignore: config.ignore.clone(),
+            index_dir: None,
+            archive: config.archive_location().to_string(),
+            warning_days: config.warning_days(),
+            templates: config.templates().unwrap_or_else(|e| {
+                eprintln!("blossom: {e}; using the built-in capture templates");
+                config::Config::default().templates().unwrap_or_default()
+            }),
+        }
+    }
+}
+
+/// A file operation, run by the worker (see [`blossom_vault::ops`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Op {
+    /// Check off an agenda entry.
+    Complete(HeadingRef, Complete),
+    /// Move a heading under another, or to the end of a file.
+    Refile {
+        /// The heading.
+        heading: HeadingRef,
+        /// The destination file.
+        file: String,
+        /// The destination heading, or `None` for the file's top level.
+        under: Option<HeadingRef>,
+    },
+    /// Archive a heading.
+    Archive(HeadingRef),
+    /// Add a capture entry.
+    Capture {
+        /// Target file.
+        file: String,
+        /// Where in it.
+        target: Target,
+        /// The entry text.
+        entry: String,
+    },
+}
+
+/// A heading the refile picker offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefileTarget {
+    /// The file.
+    pub path: String,
+    /// The heading, or `None` for the file's top level.
+    pub heading: Option<HeadingRef>,
+    /// "Projects / Blossom" (empty for a file).
+    pub outline: String,
 }
 
 /// A request from the UI.
@@ -65,6 +132,14 @@ pub enum Request {
     },
     /// Write every waiting save now, then answer [`Event::Flushed`].
     Flush,
+    /// Send the agenda for this many days now and after every change.
+    Agenda(u32),
+    /// Send the refile targets.
+    Targets,
+    /// Run a file operation, after writing waiting saves.
+    Run(Op),
+    /// Undo an operation's changes.
+    Restore(Vec<Change>),
 }
 
 /// What the worker reports.
@@ -99,6 +174,14 @@ pub enum Event {
     Flushed,
     /// The loaded file is gone.
     Missing(String),
+    /// The agenda.
+    Agenda(Arc<Agenda>),
+    /// Every heading, for the refile picker.
+    Targets(Arc<Vec<RefileTarget>>),
+    /// An operation succeeded.
+    Done(Arc<Outcome>),
+    /// An undo succeeded.
+    Restored(String),
     /// Something failed.
     Error(String),
 }
@@ -159,6 +242,9 @@ fn stream() -> impl futures::Stream<Item = Event> {
 struct Open {
     vault: Vault,
     index: NoteIndex,
+    settings: OpenVault,
+    /// Days of agenda to send after every change, once asked for.
+    agenda: Option<u32>,
     generation: u64,
     /// Tells the watcher thread of this vault to stop.
     stop: Arc<AtomicBool>,
@@ -249,6 +335,13 @@ fn run(inbox: &Receiver<Input>, myself: &Sender<Input>, emit: &mut dyn FnMut(Eve
                 }
                 emit(Event::Flushed);
             }
+            Input::Request(
+                r @ (Request::Agenda(_) | Request::Targets | Request::Run(_) | Request::Restore(_)),
+            ) => {
+                if let Some(o) = open.as_mut() {
+                    handle_op(o, r, loaded.as_deref(), emit);
+                }
+            }
             Input::Changed(g) => {
                 // A notice from a vault that has since been closed is stale.
                 let Some(o) = open.as_mut().filter(|o| o.generation == g) else {
@@ -258,6 +351,9 @@ fn run(inbox: &Receiver<Input>, myself: &Sender<Input>, emit: &mut dyn FnMut(Eve
                 match o.index.sync(&o.vault) {
                     Ok(report) => {
                         emit(Event::Files(Arc::new(file_infos(o))));
+                        if report.added.len() + report.updated.len() + report.removed.len() > 0 {
+                            emit_agenda(o, emit);
+                        }
                         if let Some(path) = &loaded {
                             if report.removed.contains(path) {
                                 emit(Event::Missing(path.clone()));
@@ -308,6 +404,8 @@ fn open_vault(req: &OpenVault, generation: u64, myself: &Sender<Input>) -> Resul
     Ok(Open {
         vault,
         index,
+        settings: req.clone(),
+        agenda: None,
         generation,
         stop,
         pending: BTreeMap::new(),
@@ -338,10 +436,130 @@ fn write_due(o: &mut Open, now: Instant, emit: &mut dyn FnMut(Event)) {
         // Refresh counts now rather than waiting for the watcher, which
         // will then find nothing new.
         match o.index.sync(&o.vault) {
-            Ok(_) => emit(Event::Files(Arc::new(file_infos(o)))),
+            Ok(_) => {
+                emit(Event::Files(Arc::new(file_infos(o))));
+                emit_agenda(o, emit);
+            }
             Err(e) => emit(Event::Error(e.to_string())),
         }
     }
+}
+
+/// The agenda, refile-target and operation requests.
+fn handle_op(o: &mut Open, request: Request, loaded: Option<&str>, emit: &mut dyn FnMut(Event)) {
+    match request {
+        Request::Agenda(days) => {
+            o.agenda = Some(days);
+            emit_agenda(o, emit);
+        }
+        Request::Targets => emit(Event::Targets(Arc::new(targets(o)))),
+        Request::Run(op) => {
+            write_due(o, far_future(), emit);
+            match run_op(o, op) {
+                Ok(out) => {
+                    let paths: Vec<String> = out.changes.iter().map(|c| c.path.clone()).collect();
+                    after_change(o, &paths, loaded, emit);
+                    emit(Event::Done(Arc::new(out)));
+                }
+                Err(e) => emit(Event::Error(e.to_string())),
+            }
+        }
+        Request::Restore(changes) => {
+            write_due(o, far_future(), emit);
+            match o.vault.restore(&changes) {
+                Ok(()) => {
+                    let paths: Vec<String> = changes.iter().map(|c| c.path.clone()).collect();
+                    after_change(o, &paths, loaded, emit);
+                    emit(Event::Restored("Undone".into()));
+                }
+                Err(e) => emit(Event::Error(format!("Couldn't undo: {e}"))),
+            }
+        }
+        _ => {}
+    }
+}
+
+fn run_op(o: &Open, op: Op) -> Result<Outcome, OpError> {
+    let now = chrono::Local::now().naive_local();
+    match op {
+        Op::Complete(h, how) => o.vault.complete(&h, how, now),
+        Op::Refile {
+            heading,
+            file,
+            under,
+        } => o.vault.refile(&heading, &file, under.as_ref()),
+        Op::Archive(h) => o.vault.archive(&h, &o.settings.archive, now),
+        Op::Capture {
+            file,
+            target,
+            entry,
+        } => o.vault.capture(&file, &target, &entry, now.date()),
+    }
+}
+
+/// After an operation wrote `paths`: forget our save chains for them (the
+/// UI's base is now stale), refresh the index, the file list, the agenda and
+/// the loaded file.
+fn after_change(o: &mut Open, paths: &[String], loaded: Option<&str>, emit: &mut dyn FnMut(Event)) {
+    for p in paths {
+        o.written.remove(p);
+    }
+    match o.index.sync(&o.vault) {
+        Ok(_) => {
+            emit(Event::Files(Arc::new(file_infos(o))));
+            emit_agenda(o, emit);
+        }
+        Err(e) => emit(Event::Error(e.to_string())),
+    }
+    if let Some(l) = loaded.filter(|l| paths.iter().any(|p| p == l)) {
+        emit_document(o, l, emit);
+    }
+}
+
+fn emit_agenda(o: &Open, emit: &mut dyn FnMut(Event)) {
+    let Some(days) = o.agenda else { return };
+    match o.index.all() {
+        Ok(notes) => {
+            let opts = agenda::Options {
+                today: chrono::Local::now().date_naive(),
+                days,
+                warning_days: o.settings.warning_days,
+                include_done: false,
+            };
+            emit(Event::Agenda(Arc::new(agenda::build(&notes, &opts))));
+        }
+        Err(e) => emit(Event::Error(e.to_string())),
+    }
+}
+
+/// Every file (its top level) and every heading, in vault order.
+fn targets(o: &Open) -> Vec<RefileTarget> {
+    let notes = o.index.all().unwrap_or_default();
+    let mut out: Vec<RefileTarget> = Vec::new();
+    let mut path_titles: Vec<String> = Vec::new();
+    for n in &notes {
+        let r = &n.record;
+        if out.last().is_none_or(|t| t.path != r.path) {
+            out.push(RefileTarget {
+                path: r.path.clone(),
+                heading: None,
+                outline: String::new(),
+            });
+            path_titles.clear();
+        }
+        path_titles.truncate(r.level.saturating_sub(1));
+        path_titles.push(r.title.clone());
+        out.push(RefileTarget {
+            path: r.path.clone(),
+            heading: Some(HeadingRef {
+                path: r.path.clone(),
+                index: r.heading,
+                title: r.title.clone(),
+            }),
+            outline: path_titles.join(" / "),
+        });
+    }
+    out
 }
 
 /// Writes one save; true when the file changed.
@@ -482,8 +700,8 @@ mod tests {
         h.send(Request::Open(OpenVault {
             root: vault.clone(),
             keywords: Keywords::default(),
-            ignore: vec![],
             index_dir: Some(dir.path().join("index")),
+            ..OpenVault::new(PathBuf::new(), &config::Config::default())
         }));
         let files = h.wait(|e| match e {
             Event::Files(f) => Some(f),
@@ -526,8 +744,8 @@ mod tests {
         h.send(Request::Open(OpenVault {
             root: vault.clone(),
             keywords: Keywords::default(),
-            ignore: vec![],
             index_dir: Some(dir.join("index")),
+            ..OpenVault::new(PathBuf::new(), &config::Config::default())
         }));
         h.wait(|e| matches!(e, Event::Files(_)).then_some(()));
         (h, vault)
@@ -610,13 +828,93 @@ mod tests {
     }
 
     #[test]
+    fn operations_flush_saves_then_run_and_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, vault) = opened(
+            dir.path(),
+            &[("a.org", "* TODO one\nSCHEDULED: <2026-11-01 Sun>\n* two\n")],
+        );
+        h.send(Request::Agenda(3));
+        let a = h.wait(|e| match e {
+            Event::Agenda(a) => Some(a),
+            _ => None,
+        });
+        assert_eq!(a.overdue.len(), 1);
+        h.send(Request::Load("a.org".into()));
+        let base = h.wait(|e| match e {
+            Event::Document(_, _, r) => Some(r),
+            _ => None,
+        });
+        // A waiting save is written before the operation reads the file.
+        save(
+            &h,
+            "a.org",
+            "* TODO one\nSCHEDULED: <2026-11-01 Sun>\n* two\n* three\n",
+            Some(base),
+        );
+        h.send(Request::Run(Op::Archive(HeadingRef {
+            path: "a.org".into(),
+            index: 2,
+            title: "three".into(),
+        })));
+        let out = h.wait(|e| match e {
+            Event::Done(o) => Some(o),
+            Event::Error(e) => panic!("{e}"),
+            _ => None,
+        });
+        assert_eq!(out.message, "Archived to a.org_archive");
+        assert_eq!(
+            fs::read_to_string(vault.join("a.org")).unwrap(),
+            "* TODO one\nSCHEDULED: <2026-11-01 Sun>\n* two\n"
+        );
+        assert!(
+            fs::read_to_string(vault.join("a.org_archive"))
+                .unwrap()
+                .starts_with("* three\n")
+        );
+        h.send(Request::Restore(out.changes.clone()));
+        h.wait(|e| match e {
+            Event::Restored(_) => Some(()),
+            Event::Error(e) => panic!("{e}"),
+            _ => None,
+        });
+        assert!(
+            fs::read_to_string(vault.join("a.org"))
+                .unwrap()
+                .ends_with("* three\n")
+        );
+        assert!(!vault.join("a.org_archive").exists());
+        // Checking the task off from the agenda; the new agenda follows.
+        h.send(Request::Run(Op::Complete(
+            HeadingRef {
+                path: "a.org".into(),
+                index: 0,
+                title: "one".into(),
+            },
+            Complete::Toggle,
+        )));
+        let a = h.wait(|e| match e {
+            Event::Agenda(a) => Some(a),
+            Event::Error(e) => panic!("{e}"),
+            _ => None,
+        });
+        assert_eq!(a.overdue, []);
+        h.send(Request::Targets);
+        let t = h.wait(|e| match e {
+            Event::Targets(t) => Some(t),
+            _ => None,
+        });
+        let outlines: Vec<&str> = t.iter().map(|t| t.outline.as_str()).collect();
+        assert_eq!(outlines, ["", "one", "two", "three"]);
+    }
+
+    #[test]
     fn reports_a_bad_vault() {
         let h = Harness::start();
         h.send(Request::Open(OpenVault {
             root: PathBuf::from("/nonexistent/blossom-vault"),
             keywords: Keywords::default(),
-            ignore: vec![],
-            index_dir: None,
+            ..OpenVault::new(PathBuf::new(), &config::Config::default())
         }));
         let msg = h.wait(|e| match e {
             Event::Error(m) => Some(m),

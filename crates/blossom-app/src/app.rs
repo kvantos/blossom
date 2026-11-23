@@ -8,6 +8,12 @@
 //! Every local change goes through [`OpenFile::change`] (undo) and
 //! [`App::save_open`] (autosave). Disk versions arrive as worker events and
 //! go through [`App::on_disk`], which adopts, merges or reports a conflict.
+//!
+//! The agenda replaces the outline and read view when chosen in the sidebar.
+//! Operations that may touch other files (checking off agenda entries,
+//! capture, refile, archive) run in the worker as an [`Op`]; the notice bar
+//! then offers to undo them, which restores the files only if nothing
+//! changed them since.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -16,7 +22,9 @@ use std::sync::Arc;
 use blossom_core::editing::{self, ListContinue};
 use blossom_core::render::Span;
 use blossom_core::{Document, EditError, Heading, PlanningKind, Timestamp};
+use blossom_index::agenda::Agenda;
 use blossom_vault::Revision;
+use blossom_vault::ops::{Change, HeadingRef};
 use chrono::{Datelike, NaiveDate, NaiveTime};
 use iced::keyboard::{self, Key};
 use iced::theme::Mode;
@@ -27,14 +35,16 @@ use iced::widget::{
 };
 use iced::{Element, Fill, Font, Length, Subscription, Task, Theme, font, window};
 
+use crate::agenda;
 use crate::editor::{self, Command};
 use crate::file::{DiskCopy, DiskState, Group, OpenFile, SectionEditor, Selected};
 use crate::outline;
+use crate::panels::{self, CapturePanel, RefilePicker};
 use crate::read::{self, Actions, Ink};
 use crate::shot;
 use crate::style::{self, Chip};
 use crate::tree::{self, FileInfo};
-use crate::worker::{self, Event, Handle, OpenVault, Request};
+use crate::worker::{self, Event, Handle, Op, OpenVault, Request};
 
 /// The section editor's widget id, for focusing it.
 const EDITOR_ID: &str = "section-editor";
@@ -65,6 +75,29 @@ pub struct App {
     today: NaiveDate,
     /// The screenshot developer hook, when on.
     shot: Option<shot::Plan>,
+    /// What the main area shows.
+    view: View,
+    /// The latest agenda from the worker.
+    agenda: Option<Arc<Agenda>>,
+    /// A heading to select once its file has loaded.
+    pending_heading: Option<(String, usize)>,
+    /// The last operation's message, and its changes while it can be undone.
+    notice: Option<(String, Option<Vec<Change>>)>,
+    /// The capture panel, while open.
+    capture: Option<CapturePanel>,
+    /// A capture was sent and its result is awaited.
+    capture_sent: bool,
+    /// The refile picker, while open.
+    refile: Option<RefilePicker>,
+}
+
+/// What the main area shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    /// The outline and read view of a file.
+    Files,
+    /// The agenda.
+    Agenda,
 }
 
 /// Everything that can happen.
@@ -128,6 +161,38 @@ pub enum Message {
     DismissStatus,
     /// The screenshot hook's capture.
     Shot(iced::window::Screenshot),
+    /// Show the agenda.
+    ShowAgenda,
+    /// Open a file at a heading (from the agenda).
+    OpenHeading(String, usize),
+    /// Run a file operation in the worker.
+    Run(Op),
+    /// Undo the last operation.
+    UndoOp,
+    /// Hide the notice bar.
+    DismissNotice,
+    /// Open the capture panel.
+    OpenCapture,
+    /// Capture: choose a template, by its label.
+    CaptureTemplate(String),
+    /// Capture: answer prompt N.
+    CaptureAnswer(usize, String),
+    /// Capture: the editor.
+    CaptureAction(Action),
+    /// Capture: save.
+    CaptureSave,
+    /// Capture: close without saving.
+    CaptureCancel,
+    /// Open the refile picker for the selected heading.
+    StartRefile,
+    /// Refile: the filter text.
+    RefileFilter(String),
+    /// Refile: move to target N.
+    RefilePick(usize),
+    /// Refile: close.
+    RefileCancel,
+    /// Archive the selected heading.
+    Archive,
 }
 
 /// A metadata panel text field.
@@ -167,7 +232,18 @@ impl App {
             closing: false,
             close_warned: false,
             today,
+            view: if shot.as_ref().is_some_and(|p| p.agenda) {
+                View::Agenda
+            } else {
+                View::Files
+            },
             shot,
+            agenda: None,
+            pending_heading: None,
+            notice: None,
+            capture: None,
+            capture_sent: false,
+            refile: None,
         };
         if forced.is_some() {
             return (app, Task::none());
@@ -240,7 +316,10 @@ impl App {
                     self.collapsed_folders.insert(path);
                 }
             }
-            Message::SelectFile(path) => self.select_file(path),
+            Message::SelectFile(path) => {
+                self.view = View::Files;
+                self.select_file(path);
+            }
             Message::ToggleFold(i) => {
                 if let Some(f) = &mut self.file
                     && !f.folded.remove(&i)
@@ -294,6 +373,84 @@ impl App {
             Message::Key(event) => return self.on_key(&event),
             Message::CloseRequested => return self.close(),
             Message::DismissStatus => self.status = None,
+            other => return self.update_ops(other),
+        }
+        Task::none()
+    }
+
+    /// The agenda, capture, refile and archive messages, and the screenshot
+    /// ([`App::update`] handles the rest).
+    fn update_ops(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::ShowAgenda => {
+                self.view = View::Agenda;
+                if let Some(w) = &self.worker {
+                    w.send(Request::Agenda(agenda::DAYS));
+                }
+            }
+            Message::OpenHeading(path, index) => self.open_heading(path, index),
+            Message::Run(op) => self.run(op),
+            Message::UndoOp => {
+                if let Some((_, Some(changes))) = self.notice.take()
+                    && let Some(w) = &self.worker
+                {
+                    w.send(Request::Restore(changes));
+                }
+            }
+            Message::DismissNotice => self.notice = None,
+            Message::OpenCapture => return self.open_capture(),
+            Message::CaptureTemplate(label) => {
+                let templates = &self.template.templates;
+                if let Some(p) = &mut self.capture
+                    && let Some(i) = templates
+                        .iter()
+                        .position(|t| format!("{} — {}", t.key, t.name) == label)
+                {
+                    p.choose(templates, i);
+                }
+            }
+            Message::CaptureAnswer(i, v) => {
+                if let Some(p) = &mut self.capture {
+                    if let Some(a) = p.answers.get_mut(i) {
+                        *a = v;
+                    }
+                    p.expand(&self.template.templates);
+                }
+            }
+            Message::CaptureAction(action) => {
+                if let Some(p) = &mut self.capture {
+                    p.edited |= action.is_edit();
+                    p.content.perform(action);
+                }
+            }
+            Message::CaptureSave => self.save_capture(),
+            Message::CaptureCancel => {
+                self.capture = None;
+                self.capture_sent = false;
+            }
+            Message::StartRefile => return self.start_refile(),
+            Message::RefileFilter(f) => {
+                if let Some(r) = &mut self.refile {
+                    r.filter = f;
+                }
+            }
+            Message::RefilePick(i) => {
+                if let Some(r) = self.refile.take()
+                    && let Some(t) = r.targets.as_ref().and_then(|all| all.get(i))
+                {
+                    self.run(Op::Refile {
+                        heading: r.heading,
+                        file: t.path.clone(),
+                        under: t.heading.clone(),
+                    });
+                }
+            }
+            Message::RefileCancel => self.refile = None,
+            Message::Archive => {
+                if let Some(h) = self.selected_ref() {
+                    self.run(Op::Archive(h));
+                }
+            }
             Message::Shot(shot) => {
                 if let Some(plan) = &self.shot
                     && let Err(e) =
@@ -303,6 +460,7 @@ impl App {
                 }
                 return iced::exit();
             }
+            _ => {}
         }
         Task::none()
     }
@@ -338,6 +496,13 @@ impl App {
                 self.worker = Some(handle);
             }
             Event::Opened(root) => {
+                if self.view == View::Agenda
+                    && let Some(w) = &self.worker
+                {
+                    w.send(Request::Agenda(agenda::DAYS));
+                }
+                self.agenda = None;
+                self.notice = None;
                 self.vault_input = root.display().to_string();
                 self.root = Some(root);
                 self.file = None;
@@ -362,8 +527,23 @@ impl App {
                     .file
                     .as_ref()
                     .is_some_and(|f| f.path == path && f.doc.is_none());
-                self.on_disk(path, Some((doc, rev)));
-                if was_loading && let Some(plan) = self.shot.clone() {
+                self.on_disk(path.clone(), Some((doc, rev)));
+                if let Some((p, i)) = self.pending_heading.take() {
+                    if p == path
+                        && let Some(f) = self.file.as_mut().filter(|f| f.path == path)
+                        && f.doc.as_ref().is_some_and(|d| i < d.headings().len())
+                    {
+                        f.selected = Selected::Heading(i);
+                        f.refresh_blocks();
+                        f.fill_inputs();
+                    } else if p != path {
+                        self.pending_heading = Some((p, i));
+                    }
+                }
+                if was_loading
+                    && self.view == View::Files
+                    && let Some(plan) = self.shot.clone()
+                {
                     return self.shoot(&plan);
                 }
             }
@@ -387,9 +567,141 @@ impl App {
                     return iced::exit();
                 }
             }
-            Event::Error(e) => self.status = Some(e),
+            Event::Agenda(_) | Event::Targets(_) | Event::Done(_) | Event::Restored(_) => {
+                return self.on_op_event(event);
+            }
+            Event::Error(e) => {
+                self.capture_sent = false;
+                self.status = Some(e);
+            }
         }
         Task::none()
+    }
+
+    /// Worker events about the agenda and operations.
+    fn on_op_event(&mut self, event: Event) -> Task<Message> {
+        match event {
+            Event::Agenda(a) => {
+                let first = self.agenda.is_none();
+                self.agenda = Some(a);
+                if first
+                    && self.view == View::Agenda
+                    && let Some(plan) = self.shot.clone()
+                {
+                    return self.shoot(&plan);
+                }
+            }
+            Event::Targets(t) => {
+                if let Some(r) = &mut self.refile {
+                    r.targets = Some(t);
+                }
+            }
+            Event::Done(out) => {
+                if std::mem::take(&mut self.capture_sent) {
+                    self.capture = None;
+                }
+                self.notice = Some((out.message.clone(), Some(out.changes.clone())));
+            }
+            Event::Restored(msg) => self.notice = Some((msg, None)),
+            _ => {}
+        }
+        Task::none()
+    }
+
+    fn open_heading(&mut self, path: String, index: usize) {
+        self.view = View::Files;
+        if let Some(f) = &mut self.file
+            && f.path == path
+            && f.doc.is_some()
+        {
+            f.editor = None;
+            f.selected = Selected::Heading(index);
+            f.refresh_blocks();
+            f.fill_inputs();
+            return;
+        }
+        self.pending_heading = Some((path.clone(), index));
+        self.select_file(path);
+    }
+
+    /// Sends `op` to the worker, unless a file it touches has a save conflict.
+    fn run(&mut self, op: Op) {
+        let paths: Vec<&str> = match &op {
+            Op::Complete(h, _) | Op::Archive(h) => vec![h.path.as_str()],
+            Op::Refile { heading, file, .. } => vec![heading.path.as_str(), file.as_str()],
+            Op::Capture { file, .. } => vec![file.as_str()],
+        };
+        if let Some(p) = paths
+            .iter()
+            .find(|p| self.disk.get(**p).is_some_and(|d| d.conflict.is_some()))
+        {
+            self.status = Some(format!(
+                "{p} has edits that conflict with the disk version; choose a version first"
+            ));
+            return;
+        }
+        if let Some(w) = &self.worker {
+            w.send(Request::Run(op));
+        }
+    }
+
+    /// The selected heading of the open file, for refile and archive.
+    fn selected_ref(&self) -> Option<HeadingRef> {
+        let f = self.file.as_ref()?;
+        let Selected::Heading(i) = f.selected else {
+            return None;
+        };
+        let h = f.doc.as_ref()?.heading(i)?;
+        Some(HeadingRef {
+            path: f.path.clone(),
+            index: i,
+            title: h.title.clone(),
+        })
+    }
+
+    fn open_capture(&mut self) -> Task<Message> {
+        if self.template.templates.is_empty() {
+            self.status = Some("No capture templates are configured".into());
+            return Task::none();
+        }
+        let now = chrono::Local::now().naive_local();
+        self.capture = Some(CapturePanel::new(&self.template.templates, 0, now));
+        self.capture_sent = false;
+        iced::widget::operation::focus(panels::CAPTURE_EDITOR)
+    }
+
+    fn save_capture(&mut self) {
+        let Some(p) = &self.capture else { return };
+        let Some(t) = self.template.templates.get(p.template) else {
+            return;
+        };
+        let entry = p.entry();
+        if entry.trim().is_empty() {
+            self.status = Some("Nothing to capture".into());
+            return;
+        }
+        let op = Op::Capture {
+            file: t.file.clone(),
+            target: t.target.clone(),
+            entry,
+        };
+        self.capture_sent = true;
+        self.run(op);
+    }
+
+    fn start_refile(&mut self) -> Task<Message> {
+        let Some(heading) = self.selected_ref() else {
+            return Task::none();
+        };
+        if let Some(w) = &self.worker {
+            w.send(Request::Targets);
+        }
+        self.refile = Some(RefilePicker {
+            heading,
+            filter: String::new(),
+            targets: None,
+        });
+        iced::widget::operation::focus(panels::REFILE_INPUT)
     }
 
     /// A disk version of `path` (or its absence) arrived: from loading,
@@ -733,8 +1045,17 @@ impl App {
         let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
             return Task::none();
         };
+        if matches!(key, Key::Named(keyboard::key::Named::Escape)) {
+            if self.refile.take().is_some() {
+                return Task::none();
+            }
+            if self.capture.is_some() && !self.capture_sent {
+                self.capture = None;
+                return Task::none();
+            }
+        }
         let editing = self.file.as_ref().is_some_and(|f| f.editor.is_some());
-        if editing || !modifiers.command() {
+        if editing || self.capture.is_some() || self.refile.is_some() || !modifiers.command() {
             return Task::none();
         }
         match key.as_ref() {
@@ -743,6 +1064,10 @@ impl App {
             Key::Character(c) if c.eq_ignore_ascii_case("e") => return self.start_editing(),
             Key::Character(c) if c.eq_ignore_ascii_case("o") => {
                 return self.update(Message::PickFolder);
+            }
+            Key::Character(c) if c.eq_ignore_ascii_case("n") => return self.open_capture(),
+            Key::Character(c) if c.eq_ignore_ascii_case("a") && modifiers.shift() => {
+                return self.update(Message::ShowAgenda);
             }
             _ => {}
         }
@@ -778,7 +1103,9 @@ impl App {
             f.refresh_blocks();
             f.fill_inputs();
         }
-        let focus = if plan.edit {
+        let focus = if plan.capture {
+            self.open_capture()
+        } else if plan.edit {
             self.start_editing()
         } else {
             Task::none()
@@ -817,7 +1144,53 @@ impl App {
 
     /// The whole window.
     pub fn view(&self) -> Element<'_, Message> {
-        let body: Element<'_, Message> = if self.root.is_some() {
+        self.body()
+    }
+
+    /// The capture panel or refile picker, when one is open. It takes the
+    /// main area rather than floating over it: iced's layered `stack` drops
+    /// a text editor's text.
+    fn panel(&self) -> Option<Element<'_, Message>> {
+        if let Some(r) = &self.refile {
+            return Some(panels::refile_view(r));
+        }
+        let p = self.capture.as_ref()?;
+        let keywords = self
+            .file
+            .as_ref()
+            .and_then(|f| f.doc.as_ref())
+            .map_or_else(|| self.template.keywords.clone(), |d| d.keywords().clone());
+        Some(panels::capture_view(p, &self.template.templates, &keywords))
+    }
+
+    fn body(&self) -> Element<'_, Message> {
+        let main: Element<'_, Message> = if self.root.is_none() {
+            self.welcome()
+        } else if let Some(panel) = self.panel() {
+            row![
+                container(self.sidebar())
+                    .width(240)
+                    .height(Fill)
+                    .style(style::pane),
+                rule::vertical(1),
+                container(panel).center(Fill),
+            ]
+            .height(Fill)
+            .into()
+        } else if self.view == View::Agenda {
+            row![
+                container(self.sidebar())
+                    .width(240)
+                    .height(Fill)
+                    .style(style::pane),
+                rule::vertical(1),
+                container(agenda::view(self.agenda.as_deref(), self.today))
+                    .width(Fill)
+                    .height(Fill),
+            ]
+            .height(Fill)
+            .into()
+        } else {
             row![
                 container(self.sidebar())
                     .width(240)
@@ -834,9 +1207,26 @@ impl App {
             ]
             .height(Fill)
             .into()
-        } else {
-            self.welcome()
         };
+        let mut body = column![main];
+        if let Some((msg, undo)) = &self.notice {
+            let mut bar = row![text(msg.as_str()).size(13).width(Fill)]
+                .spacing(8)
+                .align_y(iced::Center);
+            if undo.as_ref().is_some_and(|c| !c.is_empty()) {
+                bar = bar.push(
+                    button(text("Undo").size(13))
+                        .on_press(Message::UndoOp)
+                        .padding([2, 10]),
+                );
+            }
+            bar = bar.push(
+                button(text("Dismiss").size(13))
+                    .on_press(Message::DismissNotice)
+                    .style(button::text),
+            );
+            body = body.push(container(bar).padding([4, 10]).style(style::notice));
+        }
         match &self.status {
             Some(msg) => column![
                 body,
@@ -853,7 +1243,7 @@ impl App {
                 .style(style::pane),
             ]
             .into(),
-            None => body,
+            None => body.into(),
         }
     }
 
@@ -952,7 +1342,22 @@ impl App {
                 bottom: 8.0,
                 left: 12.0
             }),
-            scrollable(Column::with_children(rows).spacing(1).padding([0, 6])).height(Fill),
+            column![
+                button(text("Agenda").size(14))
+                    .on_press(Message::ShowAgenda)
+                    .width(Fill)
+                    .padding([4, 12])
+                    .style(style::row(self.view == View::Agenda)),
+                button(text("Capture…").size(14))
+                    .on_press(Message::OpenCapture)
+                    .width(Fill)
+                    .padding([4, 12])
+                    .style(style::row(false)),
+            ]
+            .spacing(1)
+            .padding([0, 6]),
+            rule::horizontal(1),
+            scrollable(Column::with_children(rows).spacing(1).padding([6, 6])).height(Fill),
         ]
         .into()
     }
@@ -1085,15 +1490,25 @@ impl App {
         match (f.selected, heading) {
             (Selected::Heading(i), Some(h)) => {
                 let title = f.titles.get(i).map_or(&[][..], Vec::as_slice);
+                let small = |label: &'static str, msg: Message| {
+                    button(text(label).size(13))
+                        .on_press(msg)
+                        .padding([3, 8])
+                        .style(button::text)
+                };
                 parts.push(
                     row![
-                        container(read::sized(title, 24, ink, Message::Link)).width(Fill),
                         history_buttons(f),
+                        space::horizontal().width(Fill),
+                        small("Refile…", Message::StartRefile),
+                        small("Archive", Message::Archive),
                         edit_button
                     ]
                     .spacing(6)
+                    .align_y(iced::Center)
                     .into(),
                 );
+                parts.push(read::sized(title, 24, ink, Message::Link));
                 parts.push(self.metadata(h, doc));
                 let chips = reader_chips(h, doc, self.today);
                 if !chips.is_empty() {
@@ -1502,24 +1917,24 @@ fn short_date(ts: &Timestamp, today: NaiveDate) -> String {
     s
 }
 
-fn chip<'a>(label: String, kind: Chip) -> Element<'a, Message> {
+pub(crate) fn chip<'a>(label: String, kind: Chip) -> Element<'a, Message> {
     container(text(label).size(11).font(bold()))
         .padding([1, 6])
         .style(move |t| style::chip(t, kind))
         .into()
 }
 
-fn placeholder(msg: &str) -> Element<'_, Message> {
+pub(crate) fn placeholder(msg: &str) -> Element<'_, Message> {
     container(text(msg).size(14).style(dim)).center(Fill).into()
 }
 
-fn dim(theme: &Theme) -> text::Style {
+pub(crate) fn dim(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(style::dim(theme)),
     }
 }
 
-fn bold() -> Font {
+pub(crate) fn bold() -> Font {
     Font {
         weight: font::Weight::Bold,
         ..Font::DEFAULT
@@ -1582,12 +1997,7 @@ mod tests {
     use blossom_core::render::Block;
 
     fn app() -> App {
-        let template = OpenVault {
-            root: PathBuf::new(),
-            keywords: Keywords::default(),
-            ignore: vec![],
-            index_dir: None,
-        };
+        let template = OpenVault::new(PathBuf::new(), &blossom_vault::config::Config::default());
         App::new(
             None,
             template,
@@ -1641,6 +2051,94 @@ mod tests {
             };
             let _ = a.update(Message::EditorAction(Action::Edit(edit)));
         }
+    }
+
+    #[test]
+    fn agenda_opens_headings_and_notices_offer_undo() {
+        let mut a = loaded("* one\n* two\n");
+        let _ = a.update(Message::ShowAgenda);
+        assert_eq!(a.view, View::Agenda);
+        // A heading in another file: selected once that file arrives.
+        let _ = a.update(Message::OpenHeading("b.org".into(), 1));
+        assert_eq!(a.view, View::Files);
+        let _ = a.update(Message::Worker(Event::Document(
+            "b.org".into(),
+            doc("* x\n* y\n"),
+            rev(2),
+        )));
+        assert_eq!(a.file.as_ref().unwrap().selected, Selected::Heading(1));
+        // In the open file: selected at once.
+        let _ = a.update(Message::OpenHeading("b.org".into(), 0));
+        assert_eq!(a.file.as_ref().unwrap().selected, Selected::Heading(0));
+        let out = blossom_vault::ops::Outcome {
+            changes: vec![Change {
+                path: "b.org".into(),
+                before: Some("* x\n* y\n".into()),
+                after: "* y\n".into(),
+            }],
+            path: "b.org".into(),
+            heading: Some(0),
+            line: 1,
+            message: "Archived to b.org_archive".into(),
+        };
+        let _ = a.update(Message::Worker(Event::Done(Arc::new(out))));
+        assert!(
+            matches!(&a.notice, Some((m, Some(c))) if m.starts_with("Archived") && c.len() == 1)
+        );
+        let _ = a.update(Message::UndoOp);
+        assert!(a.notice.is_none());
+    }
+
+    #[test]
+    fn capture_panel_expands_and_keeps_typing() {
+        let mut a = loaded("* one\n");
+        let _ = a.update(Message::OpenCapture);
+        let label = |t: &blossom_vault::config::Template| format!("{} — {}", t.key, t.name);
+        let todo = label(&a.template.templates[1]);
+        let _ = a.update(Message::CaptureTemplate(todo));
+        let p = a.capture.as_ref().unwrap();
+        assert_eq!(p.entry(), "* TODO ");
+        // The cursor is where `%?` was: typing goes there.
+        let _ = a.update(Message::CaptureAction(Action::Edit(Edit::Insert('x'))));
+        let p = a.capture.as_ref().unwrap();
+        assert_eq!(p.entry(), "* TODO x");
+        assert!(p.edited);
+        let _ = a.update(Message::CaptureSave);
+        assert!(a.capture_sent);
+        let _ = a.update(Message::Worker(Event::Error("disk full".into())));
+        assert!(a.capture.is_some() && !a.capture_sent);
+        let _ = a.update(Message::CaptureCancel);
+        assert!(a.capture.is_none());
+    }
+
+    #[test]
+    fn refile_picker_filters_and_skips_itself() {
+        let mut a = loaded("* one\n* two\n");
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        let _ = a.update(Message::StartRefile);
+        let t = |path: &str, index: Option<usize>, outline: &str| worker::RefileTarget {
+            path: path.into(),
+            heading: index.map(|i| HeadingRef {
+                path: path.into(),
+                index: i,
+                title: outline.rsplit(" / ").next().unwrap_or("").into(),
+            }),
+            outline: outline.into(),
+        };
+        let targets = vec![
+            t("a.org", None, ""),
+            t("a.org", Some(0), "one"),
+            t("a.org", Some(1), "two"),
+            t("work/b.org", Some(0), "Projects / Blossom"),
+        ];
+        let _ = a.update(Message::Worker(Event::Targets(Arc::new(targets))));
+        let r = a.refile.as_ref().unwrap();
+        assert_eq!(r.heading.title, "one");
+        assert_eq!(r.matches(), [0, 2, 3]);
+        let _ = a.update(Message::RefileFilter("work blos".into()));
+        assert_eq!(a.refile.as_ref().unwrap().matches(), [3]);
+        let _ = a.update(Message::RefilePick(3));
+        assert!(a.refile.is_none());
     }
 
     #[test]

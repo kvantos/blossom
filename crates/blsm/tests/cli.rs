@@ -69,7 +69,8 @@ fn agenda_text() {
     let env = Env::new(&[("work.org", WORK)], CONFIG);
     assert_eq!(
         env.ok(&["agenda", "--days", "3"]),
-        "Mon 2026-11-23\n  09:00  scheduled  NEXT [#A] Call Bob  :phone:  (work.org:1)\n\n\
+        "Due soon\n         in 2d      TODO Report  (work.org:3)\n\n\
+         Mon 2026-11-23\n  09:00  scheduled  NEXT [#A] Call Bob  :phone:  (work.org:1)\n\n\
          Wed 2026-11-25\n         deadline   TODO Report  (work.org:3)\n"
     );
     // --all includes the done item, which is overdue.
@@ -77,6 +78,107 @@ fn agenda_text() {
         env.ok(&["agenda", "--all"])
             .starts_with("Overdue\n         scheduled  DONE Filed")
     );
+    // Repeats show ahead; a warning window of 1 day drops "due soon".
+    let env = Env::new(
+        &[(
+            "r.org",
+            "* TODO Water plants\nSCHEDULED: <2026-11-21 Sat +3d>\n* bins\n<2026-11-17 Tue +1w>\n",
+        )],
+        "deadline_warning_days = 1\n",
+    );
+    assert_eq!(
+        env.ok(&["agenda", "--days", "4"]),
+        "Overdue\n         scheduled  TODO Water plants  (r.org:1)\n\n\
+         Mon 2026-11-23\n\n\
+         Tue 2026-11-24\n         event      bins  (r.org:3)\n         repeat     TODO Water plants  (r.org:1)\n"
+    );
+    // Query terms narrow it.
+    assert_eq!(
+        env.ok(&["agenda", "--days", "4", "bins"]),
+        "Mon 2026-11-23\n\nTue 2026-11-24\n         event      bins  (r.org:3)\n"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&env.ok(&["--json", "agenda", "--days", "2"])).unwrap();
+    assert_eq!(json["days"][1]["items"][1]["placement"], "scheduled-repeat");
+}
+
+#[test]
+fn capture_with_templates() {
+    let config = "\
+[[capture]]
+key = \"t\"
+file = \"tasks.org\"
+target = \"heading\"
+heading = \"Inbox\"
+template = \"* TODO %^{What}\\n%U %?\"
+[[capture]]
+key = \"j\"
+file = \"journal.org\"
+target = \"datetree\"
+template = \"* %?\"
+";
+    let env = Env::new(&[("tasks.org", "* Inbox\n* Done\n")], config);
+    assert_eq!(
+        env.ok(&["capture", "-t", "t", "--set", "What=Buy milk", "2 litres"]),
+        "tasks.org:2\n"
+    );
+    assert_eq!(
+        fs::read_to_string(env.vault().join("tasks.org")).unwrap(),
+        "* Inbox\n** TODO Buy milk\n[2026-11-23 Mon 10:30] 2 litres\n* Done\n"
+    );
+    assert_eq!(env.ok(&["capture", "-t", "j", "Rainy"]), "journal.org:4\n");
+    assert_eq!(
+        fs::read_to_string(env.vault().join("journal.org")).unwrap(),
+        "* 2026\n** 2026-11 November\n*** 2026-11-23 Monday\n**** Rainy\n"
+    );
+    let missing = env.run(&["capture", "-t", "t", "x"]);
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("asks for What"));
+    let unknown = env.run(&["capture", "-t", "zz", "x"]);
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("there are: t, j"));
+    assert!(
+        !env.run(&["capture", "-t", "t", "-f", "x.org", "x"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn archive_and_refile() {
+    let env = Env::new(
+        &[
+            (
+                "work.org",
+                "#+ARCHIVE: done.org::* Old\n* DONE Shipped\nnotes\n* TODO Keep\n",
+            ),
+            ("in.org", "* Idea\n"),
+        ],
+        CONFIG,
+    );
+    // Any line of the heading's section names it.
+    assert_eq!(env.ok(&["archive", "work.org:3"]), "done.org:2\n");
+    assert_eq!(
+        fs::read_to_string(env.vault().join("work.org")).unwrap(),
+        "#+ARCHIVE: done.org::* Old\n* TODO Keep\n"
+    );
+    let done = fs::read_to_string(env.vault().join("done.org")).unwrap();
+    assert!(
+        done.starts_with(
+            "* Old\n** DONE Shipped\n:PROPERTIES:\n:ARCHIVE_TIME: 2026-11-23 Mon 10:30\n"
+        ),
+        "{done}"
+    );
+    assert_eq!(
+        env.ok(&["refile", "in.org:1", "work.org:2"]),
+        "work.org:3\n"
+    );
+    assert_eq!(
+        fs::read_to_string(env.vault().join("work.org")).unwrap(),
+        "#+ARCHIVE: done.org::* Old\n* TODO Keep\n** Idea\n"
+    );
+    assert_eq!(fs::read_to_string(env.vault().join("in.org")).unwrap(), "");
+    assert!(env.ok(&["search", "idea"]).starts_with("work.org:3"));
+    assert!(!env.run(&["archive", "work.org:1"]).status.success());
+    assert!(!env.run(&["refile", "work.org", "in.org"]).status.success());
 }
 
 #[test]

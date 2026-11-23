@@ -92,6 +92,26 @@ pub struct Warning {
     pub unit: TimeUnit,
 }
 
+impl Warning {
+    /// The cookie in whole days, as Emacs's `org-get-wdays` counts it: a week
+    /// is 7 days, a month 30.4, a year 365.25, an hour 1/24, rounded down.
+    #[must_use]
+    pub fn days(&self) -> i64 {
+        let n = f64::from(self.value);
+        let days = match self.unit {
+            TimeUnit::Hour => n / 24.0,
+            TimeUnit::Day => n,
+            TimeUnit::Week => n * 7.0,
+            TimeUnit::Month => n * 30.4,
+            TimeUnit::Year => n * 365.25,
+        };
+        // At most u32::MAX * 365.25, well inside i64.
+        #[allow(clippy::cast_possible_truncation)]
+        let whole = days.floor() as i64;
+        whole
+    }
+}
+
 /// One org timestamp, possibly a range.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Timestamp {
