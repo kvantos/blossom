@@ -3,6 +3,7 @@ name = "blsm"
 description = "Command-line tool for a Blossom org vault: search, agenda, capture, todo."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 

@@ -108,8 +108,7 @@ impl App {
             worker: None,
             vault_input: open
                 .as_ref()
-                .map(|o| o.root.display().to_string())
-                .unwrap_or_default(),
+                .map_or_else(String::new, |o| o.root.display().to_string()),
             pending: open,
             template,
             root: None,
@@ -427,8 +426,7 @@ impl App {
             .root
             .as_ref()
             .and_then(|r| r.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         column![
             container(text(name).size(13).font(bold()).style(dim)).padding([10, 12]),
             scrollable(Column::with_children(rows).spacing(1).padding([0, 6])).height(Fill),
@@ -611,7 +609,7 @@ impl OpenFile {
         let Some(doc) = &self.doc else { return };
         self.blocks = match self.selected {
             Selected::Nothing => Vec::new(),
-            Selected::Intro => doc.intro_text().map(render::blocks).unwrap_or_default(),
+            Selected::Intro => doc.intro_text().map_or_else(Vec::new, render::blocks),
             Selected::Heading(i) => render::blocks(doc.body_text(i)),
         };
     }
