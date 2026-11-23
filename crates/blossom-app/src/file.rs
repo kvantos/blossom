@@ -83,8 +83,7 @@ fn clamp(content: &Content, cursor: Cursor) -> Cursor {
         let line = p.line.min(content.line_count().saturating_sub(1));
         let text = content
             .line(line)
-            .map(|l| l.text.into_owned())
-            .unwrap_or_default();
+            .map_or_else(String::new, |l| l.text.into_owned());
         let mut column = p.column.min(text.len());
         while !text.is_char_boundary(column) {
             column -= 1;
@@ -378,14 +377,12 @@ impl OpenFile {
                 .planning
                 .scheduled
                 .as_ref()
-                .map(blossom_core::Timestamp::format)
-                .unwrap_or_default(),
+                .map_or_else(String::new, blossom_core::Timestamp::format),
             deadline: h
                 .planning
                 .deadline
                 .as_ref()
-                .map(blossom_core::Timestamp::format)
-                .unwrap_or_default(),
+                .map_or_else(String::new, blossom_core::Timestamp::format),
         });
     }
 

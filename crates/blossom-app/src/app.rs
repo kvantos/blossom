@@ -624,8 +624,7 @@ impl App {
         let line = ed
             .content
             .line(cursor.position.line)
-            .map(|l| l.text.into_owned())
-            .unwrap_or_default();
+            .map_or_else(String::new, |l| l.text.into_owned());
         let at_end = cursor.selection.is_none() && cursor.position.column == line.len();
         match editing::continue_list(&line).filter(|_| at_end) {
             Some(ListContinue::Item(prefix)) => {
