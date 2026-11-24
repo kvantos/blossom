@@ -364,6 +364,32 @@ impl Query {
         self.expr.is_none() && self.agenda_days.is_none()
     }
 
+    /// Splits the query for semantic search into the words to rank by
+    /// meaning and the query that still filters.
+    ///
+    /// The words are the positive plain-text terms every match must have:
+    /// those joined by AND at the top, including inside nested AND groups,
+    /// in query order, joined by spaces (a quoted phrase stays one piece).
+    /// Everything else stays in the filter: tags, states, dates, negated
+    /// words, and words inside an OR (taking those out would change what
+    /// matches), plus `o.` sorting and `ad.`. An empty string means there
+    /// is nothing to rank by meaning.
+    ///
+    /// `buy milk t.home` gives the words `buy milk` and the filter
+    /// `t.home`; `milk OR tea` gives no words and the whole query back.
+    #[must_use]
+    pub fn split_text(&self) -> (String, Query) {
+        let mut words = Vec::new();
+        let expr = self.expr.clone().and_then(|e| take_words(e, &mut words));
+        (
+            words.join(" "),
+            Query {
+                expr,
+                ..self.clone()
+            },
+        )
+    }
+
     /// The positive plain-text terms, for narrowing and ranking.
     #[must_use]
     pub fn text_terms(&self) -> Vec<&str> {
@@ -377,6 +403,32 @@ impl Query {
                 })
                 .collect()
         })
+    }
+}
+
+/// `expr` without its required positive text terms, which go to `words`;
+/// `None` when nothing is left. Doesn't look inside OR.
+fn take_words(expr: Expr, words: &mut Vec<String>) -> Option<Expr> {
+    match expr {
+        Expr::Leaf(Term {
+            condition: Condition::Text(t),
+            negated: false,
+        }) => {
+            words.push(t);
+            None
+        }
+        Expr::And(children) => {
+            let mut rest: Vec<Expr> = children
+                .into_iter()
+                .filter_map(|c| take_words(c, words))
+                .collect();
+            match rest.len() {
+                0 => None,
+                1 => rest.pop(),
+                _ => Some(Expr::And(rest)),
+            }
+        }
+        other => Some(other),
     }
 }
 
@@ -658,6 +710,54 @@ mod tests {
                 leaf(Condition::State("todo".into()), false),
             ]))
         );
+    }
+
+    #[test]
+    fn split_text_takes_required_words() {
+        let split = |q: &str| {
+            let (words, rest) = Query::parse(q).split_text();
+            (words, rest.expr)
+        };
+        let tag = |t: &str| {
+            leaf(
+                Condition::Tag {
+                    tag: t.into(),
+                    own_only: false,
+                },
+                false,
+            )
+        };
+        assert_eq!(split("buy milk"), ("buy milk".into(), None));
+        assert_eq!(
+            split("buy t.home milk"),
+            ("buy milk".into(), Some(tag("home")))
+        );
+        assert_eq!(split("\"oat milk\" fresh"), ("oat milk fresh".into(), None));
+        // Inside nested AND groups too, but never inside OR or when negated.
+        assert_eq!(
+            split("(milk t.home) .bread"),
+            (
+                "milk".into(),
+                Some(Expr::And(vec![tag("home"), leaf(text("bread"), true)]))
+            )
+        );
+        assert_eq!(
+            split("milk OR tea"),
+            (String::new(), Query::parse("milk OR tea").expr)
+        );
+        assert_eq!(
+            split("plan (t.work OR urgent)"),
+            (
+                "plan".into(),
+                Some(Expr::Or(vec![tag("work"), leaf(text("urgent"), false)]))
+            )
+        );
+        assert_eq!(split("i.todo").0, "");
+        assert_eq!(split(""), (String::new(), None));
+        // Directives stay with the filter.
+        let (words, rest) = Query::parse("ideas o.title ad.3").split_text();
+        assert_eq!(words, "ideas");
+        assert_eq!((rest.sort.len(), rest.agenda_days), (1, Some(3)));
     }
 
     #[test]
