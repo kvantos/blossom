@@ -84,7 +84,8 @@ jobs:
     container: archlinux:base-devel
     steps:
       - name: Install build tools
-        run: pacman -Syu --noconfirm --needed git rust
+        # makepkg also checks the runtime depends (packaging/arch/PKGBUILD).
+        run: pacman -Syu --noconfirm --needed git rust libxkbcommon
       - uses: actions/checkout@v4
       - name: Build with makepkg
         env:

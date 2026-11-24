@@ -27,8 +27,15 @@ Download a file for your system from the
 `SHA256SUMS` on the release page lets you check a download:
 `sha256sum -c SHA256SUMS --ignore-missing`.
 
-On macOS the app isn't signed yet. The first time, right-click Blossom in
-Applications and choose Open, then Open again. The `.dmg` also holds `blsm`; copy
+On macOS the app isn't signed yet, so macOS blocks it the first time:
+
+- macOS 15 (Sequoia) and newer: open Blossom once and close the warning, then go
+  to System Settings → Privacy & Security, scroll down to the message about
+  Blossom and click Open Anyway.
+- macOS 14 and older: right-click Blossom in Applications, choose Open, then
+  Open again.
+
+After that it opens normally. The `.dmg` also holds `blsm`; copy
 it to a folder on your `PATH`, for example `sudo cp /Volumes/Blossom*/blsm /usr/local/bin/`.
 
 ## Build from source
