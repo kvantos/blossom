@@ -1,0 +1,50 @@
+# Maintainer: Sergio Kviato <kvantos@users.noreply.github.com>
+#
+# Builds a tagged release from source. The release workflow puts the source
+# tarball beside this file first, so makepkg uses it instead of downloading;
+# for the AUR, replace SKIP with the tarball's sha256sum.
+pkgname=blossom
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Org mode notes, tasks and agenda (desktop app and blsm CLI)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/kvantos/blossom"
+license=('MIT')
+depends=('gcc-libs' 'glibc' 'libxkbcommon')
+optdepends=(
+  'vulkan-icd-loader: GPU rendering with Vulkan'
+  'mesa: GPU rendering with OpenGL'
+  'wayland: Wayland sessions'
+  'libx11: X11 sessions'
+  'libxcursor: X11 sessions'
+  'libxi: X11 sessions'
+  'libxrandr: X11 sessions'
+)
+makedepends=('cargo' 'make')
+options=('!lto' '!debug')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/kvantos/blossom/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  make build CARGO_FLAGS=--frozen
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --workspace --release
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  make install DESTDIR="$pkgdir" PREFIX=/usr
+}

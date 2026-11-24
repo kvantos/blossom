@@ -1,0 +1,14 @@
+Package: blossom
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Sergio Kviato <kvantos@users.noreply.github.com>
+Installed-Size: @SIZE@
+Depends: libc6 (>= 2.35), libgcc-s1, libxkbcommon0
+Recommends: libegl1, libvulkan1, libwayland-client0, libx11-6, libxcursor1, libxi6, libxrandr2
+Section: editors
+Priority: optional
+Homepage: https://github.com/kvantos/blossom
+Description: Org mode notes, tasks and agenda
+ Blossom is a desktop app for a folder of org mode files. It reads and edits
+ them in place, so Emacs, git and Syncthing keep working on the same files.
+ It comes with blsm, a command-line tool for search, agenda and capture.

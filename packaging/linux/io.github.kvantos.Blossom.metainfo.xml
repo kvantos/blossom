@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.kvantos.Blossom</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Blossom</name>
+  <summary>Org mode notes, tasks and agenda</summary>
+  <description>
+    <p>
+      Blossom is a desktop app for a folder of org mode files. It reads and edits
+      them in place, so Emacs, git and Syncthing keep working on the same files.
+    </p>
+    <ul>
+      <li>Outline, reading view and a section editor that changes only what you edit</li>
+      <li>Search with Orgzly-style queries and an agenda of scheduled items and deadlines</li>
+      <li>Capture templates, refile and archive with undo</li>
+      <li>Inline images and diagrams stored as Excalidraw files</li>
+    </ul>
+    <p>It comes with blsm, a command-line tool for search, agenda and capture.</p>
+  </description>
+  <launchable type="desktop-id">io.github.kvantos.Blossom.desktop</launchable>
+  <url type="homepage">https://github.com/kvantos/blossom</url>
+  <url type="bugtracker">https://github.com/kvantos/blossom/issues</url>
+  <developer id="io.github.kvantos">
+    <name>Sergio Kviato</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>blossom</binary>
+    <binary>blsm</binary>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-11-24"/>
+  </releases>
+</component>

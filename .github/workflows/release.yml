@@ -1,0 +1,168 @@
+# Builds every package and, for a version tag, attaches them to a draft
+# GitHub release. Push a tag to release:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# "Run workflow" on the Actions tab builds the same files as artifacts
+# without making a release, to check packaging before tagging.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Read the version and check the tag
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match the version in Cargo.toml ($version)"
+            exit 1
+          fi
+
+  # Built in an Ubuntu 22.04 container so the binaries need only glibc 2.35:
+  # the .deb, the AppImage and the tarball run on Debian 12, Ubuntu 22.04 and newer.
+  linux:
+    name: Linux (.tar.gz, .deb, AppImage)
+    needs: version
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    env:
+      APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+      APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+      # No FUSE in containers: appimagetool unpacks itself instead.
+      APPIMAGE_EXTRACT_AND_RUN: 1
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git file dpkg-dev desktop-file-utils
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: make
+      - name: Check the desktop entry
+        run: desktop-file-validate packaging/linux/io.github.kvantos.Blossom.desktop
+      - name: Tarball
+        run: make dist
+      - name: Debian package
+        run: make deb && dpkg-deb --info dist/*.deb && dpkg-deb --contents dist/*.deb
+      - name: AppImage
+        run: |
+          curl -fsSL -o /usr/local/bin/appimagetool "$APPIMAGETOOL_URL"
+          echo "$APPIMAGETOOL_SHA256  /usr/local/bin/appimagetool" | sha256sum -c -
+          chmod +x /usr/local/bin/appimagetool
+          make appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+
+  arch:
+    name: Arch (.pkg.tar.zst)
+    needs: version
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install build tools
+        run: pacman -Syu --noconfirm --needed git rust
+      - uses: actions/checkout@v4
+      - name: Build with makepkg
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # makepkg refuses to run as root.
+          useradd -m builder
+          mkdir /build
+          cp packaging/arch/PKGBUILD /build/
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" /build/PKGBUILD
+          # The tarball makepkg would download for this tag; for a manual run
+          # (no tag yet) it is the checked-out commit.
+          git config --global --add safe.directory "$PWD"
+          git archive --format=tar.gz --prefix="blossom-$VERSION/" -o "/build/blossom-$VERSION.tar.gz" HEAD
+          chown -R builder /build
+          cd /build && sudo -u builder makepkg --nocheck --noconfirm
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp /build/*.pkg.tar.zst "$GITHUB_WORKSPACE/dist/"
+          tar -tf /build/*.pkg.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: dist/*
+          if-no-files-found: error
+
+  # Two .dmg files: Apple Silicon (arm64) and Intel (x86_64), both built
+  # on an Apple Silicon runner. Unsigned for now.
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: version
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: make TARGET=${{ matrix.target }}
+      - name: Check the architecture
+        run: lipo -info target/${{ matrix.target }}/release/blossom
+      - name: Disk image
+        run: make dmg TARGET=${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, linux, arch, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          name: Blossom ${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: dist/*

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Blossom
+GenericName=Note Taking
+Comment=Org mode notes, tasks and agenda
+Exec=blossom %f
+Icon=io.github.kvantos.Blossom
+Terminal=false
+Categories=Office;
+Keywords=org;orgmode;notes;todo;agenda;outliner;
+StartupNotify=true
+StartupWMClass=io.github.kvantos.Blossom
