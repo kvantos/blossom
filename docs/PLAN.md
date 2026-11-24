@@ -16,6 +16,7 @@ Version 1, 2026-11-21. A new session reads this first and updates the checkboxes
 - **Images:** linked with `[[file:...]]`.
 - **Diagrams:** drawn in a built-in canvas and stored as a pair of files side by side: `flow.excalidraw` (the source, Excalidraw's JSON, which Excalidraw tools can also edit) and `flow.svg` (generated from it). Notes link to the `.svg`, so Emacs, GitHub and any viewer show it; Blossom finds the source by name. Commit both. *(Revised 2026-11-24 with the user; it replaced "one `.svg` with the shape data embedded".)*
 - **Distribution:** outside the Mac App Store.
+- **Semantic search:** optional, `blsm search --semantic plain words` and a "By meaning" switch in the app's search screen; plain words are enough, Orgzly filters optional. Embeddings come from a built-in pure-Rust model (candle; English `bge-small-en-v1.5` by default, `multilingual-e5-small` as an option, downloaded once on first use) or an OpenAI-compatible server (e.g. Ollama). Vectors live beside the index, rebuildable. *(Agreed 2026-11-24 with the user; plan in Phase 7.)*
 - **Reference material (read-only, never modify):**
   - Bloom (Kotlin Android app, Apache-2.0) at `/home/kvantos/Projects/bloom`, commit `11e0ce1de0f4925303994c3733471413fc80c69b` (2026-11-18). Key docs: `docs/architecture.md`, `docs/search-syntax.md`, `docs/tasks-and-events.md`, `docs/terminology.md`. Key code: `app/src/main/java/com/rrajath/grove/org/OrgParser.kt`, `OrgMutations.kt`.
   - orgize upstream (MIT) at `/home/kvantos/Projects/orgize`, commit `5f26c94dcec2a33b37b1c880ace053b29b5d021e` (2024-07-22), version `0.10.0-alpha.10`.
@@ -153,5 +154,20 @@ Notes from Phase 6:
 - New dependencies: iced features `canvas`, `image`, `svg`; `arboard` 3.7 (`image-data`, `wayland-data-control`); `image` 0.25 (png only; the same version iced uses).
 - Screenshot hook: `BLOSSOM_SCREENSHOT_DIAGRAM=<link path>` opens that diagram.
 
+
+## Phase 7: search screen and semantic search
+Agreed with the user 2026-11-24; starts after the dependency upgrade and Linux packages. Keep it simple for end users: no query syntax or config needed to start.
+- [ ] App search screen (plain query language): sidebar "Search", results grouped by file, click opens the heading.
+- [ ] `crates/blossom-semantic`: `Embedder` trait, vector store (`<index_dir>/semantic/<id>.bin`, brute-force cosine), incremental sync by text hash, test embedder.
+- [ ] `Query::split_text`: positive plain-text terms become the semantic text; everything else stays a filter.
+- [ ] Built-in model (candle BERT, pinned revision + SHA-256, downloaded to the data dir; feature `builtin-model`) and OpenAI-compatible server backend; `[semantic]` config (`model = english|multilingual|server`, `server`, `server_model`, `api_key_env`).
+- [ ] `blsm search --semantic [--limit N]`, progress on stderr, `index --rebuild` drops vectors.
+- [ ] App "By meaning" switch: model download button, background embedding thread with progress.
+
 ## Later
-rowan/nom upgrade; nightly fuzzing; packaging (.app signing/notarization, AppImage/Flatpak/AUR); `blsm` name-clash check; semantic search.
+Order agreed with the user on 2026-11-24: dependency upgrade, then Linux packages, then semantic search (planned first).
+- [x] `blsm` name-clash check: the user found no `blsm` binary or package on crates.io, AUR, Debian or Homebrew (2026-11-24).
+- [ ] rowan/nom upgrade in the orgize fork (before packaging).
+- [ ] Packaging, Linux first (AUR, AppImage, then Flatpak); macOS `.app` signing/notarization later.
+- [ ] Semantic search: planned with the user, see Phase 7 (after packaging).
+- Postponed: nightly fuzzing. The user doesn't want a nightly toolchain; revisit when `cargo-fuzz` works on stable.
