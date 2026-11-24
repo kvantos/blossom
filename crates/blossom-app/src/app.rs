@@ -59,6 +59,9 @@ const EDITOR_ID: &str = "section-editor";
 /// Shown in the keyword and priority pickers for "none".
 const NONE: &str = "—";
 
+/// The welcome screen's suggested folder, created on Open if missing.
+const DEFAULT_FOLDER: &str = "~/Notes";
+
 /// The app.
 pub struct App {
     mode: Mode,
@@ -68,6 +71,8 @@ pub struct App {
     /// Used to open a typed-in or picked folder.
     template: OpenVault,
     vault_input: String,
+    /// Whether `vault_input` names a folder that already exists.
+    vault_exists: bool,
     root: Option<PathBuf>,
     files: Arc<Vec<FileInfo>>,
     collapsed_folders: HashSet<String>,
@@ -129,7 +134,7 @@ pub enum Message {
     Mode(Mode),
     /// The welcome screen's folder field.
     VaultInput(String),
-    /// Open the typed folder.
+    /// Open the typed folder, creating it if it doesn't exist.
     OpenTyped,
     /// Show the system folder picker.
     PickFolder,
@@ -254,9 +259,10 @@ impl App {
         let app = App {
             mode: forced.unwrap_or(Mode::None),
             worker: None,
+            vault_exists: open.is_some() || typed_folder_exists(DEFAULT_FOLDER),
             vault_input: open
                 .as_ref()
-                .map_or_else(String::new, |o| o.root.display().to_string()),
+                .map_or_else(|| DEFAULT_FOLDER.into(), |o| o.root.display().to_string()),
             pending: open,
             template,
             root: None,
@@ -354,14 +360,15 @@ impl App {
                     self.mode = mode;
                 }
             }
-            Message::VaultInput(s) => self.vault_input = s,
-            Message::OpenTyped => {
-                let path = self.vault_input.trim();
-                if !path.is_empty() {
-                    let root = blossom_vault::config::expand(path);
-                    self.open_folder(root);
-                }
+            Message::VaultInput(s) => {
+                self.vault_input = s;
+                self.vault_exists = typed_folder_exists(&self.vault_input);
             }
+            Message::OpenTyped => match create_folder(&self.vault_input) {
+                Ok(Some(root)) => self.open_folder(root),
+                Ok(None) => {}
+                Err(e) => self.status = Some(e),
+            },
             Message::PickFolder => {
                 return Task::perform(
                     async {
@@ -1545,15 +1552,26 @@ impl App {
                 button("Choose folder…").on_press(Message::PickFolder),
                 text("or type its path:").size(13).style(dim),
                 row![
-                    text_input("~/org", &self.vault_input)
+                    text_input(DEFAULT_FOLDER, &self.vault_input)
                         .on_input(Message::VaultInput)
                         .on_submit(Message::OpenTyped)
                         .width(360),
-                    button("Open")
-                        .on_press(Message::OpenTyped)
-                        .style(button::secondary),
+                    button(if self.vault_exists {
+                        "Open"
+                    } else {
+                        "Create and open"
+                    })
+                    .on_press(Message::OpenTyped)
+                    .style(button::secondary),
                 ]
                 .spacing(8),
+                text(if self.vault_exists {
+                    ""
+                } else {
+                    "This folder doesn't exist yet; it will be created."
+                })
+                .size(12)
+                .style(dim),
                 text("Tip: set `vault` in ~/.config/blossom/config.toml to open it on start.")
                     .size(12)
                     .style(dim),
@@ -2103,6 +2121,26 @@ fn parse_when(input: &str, today: NaiveDate) -> Result<Option<Timestamp>, ()> {
 }
 
 /// Whether a link path is an SVG.
+/// Whether the welcome screen's typed path is an existing folder. An empty
+/// field counts as existing, so no "will be created" hint shows.
+fn typed_folder_exists(input: &str) -> bool {
+    let input = input.trim();
+    input.is_empty() || blossom_vault::config::expand(input).is_dir()
+}
+
+/// The folder typed on the welcome screen, made (with any missing parents)
+/// if it doesn't exist. `None` for an empty field.
+fn create_folder(input: &str) -> Result<Option<PathBuf>, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(None);
+    }
+    let root = blossom_vault::config::expand(input);
+    std::fs::create_dir_all(&root)
+        .map(|()| Some(root.clone()))
+        .map_err(|e| format!("Couldn't create {}: {e}", root.display()))
+}
+
 fn is_svg(path: &str) -> bool {
     std::path::Path::new(path)
         .extension()
@@ -2365,6 +2403,32 @@ mod tests {
             .unwrap()
             .text()
             .to_string()
+    }
+
+    #[test]
+    fn welcome_opens_or_creates_the_typed_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app();
+        assert_eq!(a.vault_input, "~/Notes");
+        // A missing folder: flagged, then created and opened.
+        let target = dir.path().join("Notes/work");
+        let _ = a.update(Message::VaultInput(target.display().to_string()));
+        assert!(!a.vault_exists);
+        let _ = a.update(Message::OpenTyped);
+        assert!(target.is_dir());
+        assert_eq!(a.pending.as_ref().map(|o| &o.root), Some(&target));
+        // An existing folder just opens.
+        let _ = a.update(Message::VaultInput(target.display().to_string()));
+        assert!(a.vault_exists);
+        let _ = a.update(Message::OpenTyped);
+        assert!(a.status.is_none());
+        // A file in the way is reported.
+        let file = dir.path().join("f");
+        std::fs::write(&file, "").unwrap();
+        let _ = a.update(Message::VaultInput(file.display().to_string()));
+        assert!(!a.vault_exists);
+        let _ = a.update(Message::OpenTyped);
+        assert!(a.status.as_deref().unwrap().starts_with("Couldn't create"));
     }
 
     fn type_text(a: &mut App, s: &str) {
