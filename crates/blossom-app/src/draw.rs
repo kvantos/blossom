@@ -662,9 +662,7 @@ fn draw_element(frame: &mut Frame, e: &Element) {
 fn draw_unrotated(frame: &mut Frame, e: &Element) {
     let alpha = (e.opacity / 100.0).clamp(0.0, 1.0);
     let color = rgb(&e.stroke).scale_alpha(alpha);
-    let segments: Vec<f32> = excalidraw::dashes(e)
-        .map(|d| d.to_vec())
-        .unwrap_or_default();
+    let segments: Vec<f32> = excalidraw::dashes(e).map_or_else(Vec::new, |d| d.to_vec());
     let stroke = Stroke {
         line_dash: canvas::LineDash {
             segments: &segments,

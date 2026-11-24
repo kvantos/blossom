@@ -244,7 +244,7 @@ impl Element {
         let points = m
             .get("points")
             .and_then(Value::as_array)
-            .map(|ps| {
+            .map_or_else(Vec::new, |ps| {
                 ps.iter()
                     .filter_map(|p| {
                         let a = p.as_array()?;
@@ -253,8 +253,7 @@ impl Element {
                         Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32])
                     })
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         Some(Element {
             id: s(m, "id", ""),
             x: f(m, "x", 0.0),
@@ -811,8 +810,9 @@ impl Scene {
         let elements = raw
             .get("elements")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Element::from_json).collect())
-            .unwrap_or_default();
+            .map_or_else(Vec::new, |a| {
+                a.iter().filter_map(Element::from_json).collect()
+            });
         raw.insert("elements".into(), json!([]));
         Ok(Scene { raw, elements })
     }
