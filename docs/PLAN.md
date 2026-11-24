@@ -167,7 +167,7 @@ Agreed with the user 2026-11-24; starts after the dependency upgrade and Linux p
 ## Later
 Order agreed with the user on 2026-11-24: dependency upgrade, then Linux packages, then semantic search (planned first).
 - [x] `blsm` name-clash check: the user found no `blsm` binary or package on crates.io, AUR, Debian or Homebrew (2026-11-24).
-- [ ] rowan/nom upgrade in the orgize fork (before packaging).
+- [x] rowan/nom upgrade in the orgize fork (before packaging): rowan 0.17, nom 8 (see `crates/orgize/UPSTREAM.md` patch 7); `cargo update` for the rest. tantivy still pulls nom 7 for its own query grammar.
 - [ ] Packaging, Linux first (AUR, AppImage, then Flatpak); macOS `.app` signing/notarization later.
 - [ ] Semantic search: planned with the user, see Phase 7 (after packaging).
 - Postponed: nightly fuzzing. The user doesn't want a nightly toolchain; revisit when `cargo-fuzz` works on stable.

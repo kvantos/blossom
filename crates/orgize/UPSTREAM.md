@@ -35,3 +35,11 @@
    regression fixture `blossom-core/tests/fixtures/edge/empty-block.org`.
 6. `src/org.rs`: `Org` derives `Clone` (a `GreenNode` and a `ParseConfig`, both cheap
    to clone), so Blossom can copy a parsed document and splice edits into the copy.
+7. **Dependency upgrade** (2026-11-24): `rowan` 0.15 → 0.17 (no code changes needed) and
+   `nom` 7 → 8. `src/syntax/input.rs` implements nom 8's single `Input` trait in place of
+   `InputLength`/`InputIter`/`InputTake`/`InputTakeAtPosition`/`Slice`, and `Input` gained
+   inherent `slice` and `take_split` so call sites read as before. Parsers are no longer
+   callable in nom 8, so `p(input)` became `p.parse(input)` (also in `lossless_parser!`),
+   the deprecated `tuple((a, b))` became the tuple `(a, b)`, and `ParserIterator`s are
+   iterated through `by_ref()` so `finish()` can still be called. The `criterion`
+   dev-dependency was removed (the bench target is off, see 3).
