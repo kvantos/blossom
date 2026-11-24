@@ -173,12 +173,17 @@ pub enum Request {
         /// The link path.
         path: String,
     },
-    /// Save a diagram: over the one at link `path`, or as a new attachment.
+    /// Save a diagram: its source, then its SVG; over the one whose SVG is
+    /// at link `path`, or as a new pair of attachments.
     SaveDiagram {
         /// The org file.
         file: String,
-        /// The link path of an existing diagram.
+        /// The SVG's link path, for an existing diagram.
         path: Option<String>,
+        /// The source's revision when it was opened (stale-write guard).
+        base: Option<Revision>,
+        /// The `.excalidraw` text.
+        source: Arc<String>,
         /// The SVG.
         svg: Arc<String>,
     },
@@ -244,10 +249,12 @@ pub enum Event {
     Diagram {
         /// The org file.
         file: String,
-        /// The link path.
+        /// The SVG's link path.
         path: String,
-        /// Its shapes.
-        shapes: Vec<crate::diagram::Shape>,
+        /// The scene.
+        scene: Box<crate::excalidraw::Scene>,
+        /// The source's revision.
+        base: Option<Revision>,
     },
     /// An existing diagram was saved.
     DiagramSaved {
@@ -578,14 +585,129 @@ fn read_limited(full: &std::path::Path) -> Result<Vec<u8>, String> {
     std::fs::read(full).map_err(|e| e.to_string())
 }
 
+/// The diagram source file's extension.
+const SOURCE_EXT: &str = "excalidraw";
+
+fn is_svg(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+}
+
+fn modified(p: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+/// The vault-relative path of `full`, or an error naming why it can't be written.
+fn in_vault(o: &Open, full: &std::path::Path) -> Result<String, String> {
+    o.vault
+        .relative_path(full)
+        .ok_or_else(|| "only diagrams inside the vault can be written".to_string())
+}
+
+/// When the SVG at `svg` has a `.excalidraw` source beside it that is newer
+/// (or the SVG is missing), writes a fresh SVG from it and returns its bytes.
+fn regenerate(o: &Open, svg: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+    let source = svg.with_extension(SOURCE_EXT);
+    let Some(src_time) = modified(&source) else {
+        return Ok(None);
+    };
+    if modified(svg).is_some_and(|t| t >= src_time) {
+        return Ok(None);
+    }
+    let text = String::from_utf8(read_limited(&source)?).map_err(|e| e.to_string())?;
+    let scene = crate::excalidraw::Scene::parse(&text)?;
+    let out = crate::excalidraw::to_svg(&scene).into_bytes();
+    // Outside the vault it is shown but not written.
+    if let Ok(rel) = in_vault(o, svg) {
+        let rev = o.vault.revision(&rel).map_err(|e| e.to_string())?;
+        o.vault
+            .write_bytes(&rel, &out, rev)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(Some(out))
+}
+
+/// The scene of the diagram whose SVG is at link `path`, and its source's
+/// revision. An SVG saved by Blossom before source files existed gets its
+/// source written now.
+fn open_diagram(
+    o: &Open,
+    file: &str,
+    path: &str,
+) -> Result<(crate::excalidraw::Scene, Option<Revision>), String> {
+    let svg = o.vault.resolve_link(file, path);
+    let source = svg.with_extension(SOURCE_EXT);
+    if source.exists() {
+        let text = String::from_utf8(read_limited(&source)?).map_err(|e| e.to_string())?;
+        let scene = crate::excalidraw::Scene::parse(&text)?;
+        let base = match o.vault.relative_path(&source) {
+            Some(rel) => o.vault.revision(&rel).map_err(|e| e.to_string())?,
+            None => None,
+        };
+        return Ok((scene, base));
+    }
+    let old = std::fs::read_to_string(&svg).map_err(|e| e.to_string())?;
+    let Some(shapes) = crate::diagram::from_svg(&old)? else {
+        return Err(format!(
+            "there is no .{SOURCE_EXT} file beside it, so it can't be edited here"
+        ));
+    };
+    let json = crate::excalidraw::Scene::from_shapes(&shapes).to_json();
+    let rel = in_vault(o, &source)?;
+    let rev = o
+        .vault
+        .write_bytes(&rel, json.as_bytes(), None)
+        .map_err(|e| e.to_string())?;
+    Ok((crate::excalidraw::Scene::parse(&json)?, Some(rev)))
+}
+
+/// Writes an existing diagram's source (refused if it changed since `base`),
+/// then its SVG.
+fn save_diagram(
+    o: &Open,
+    file: &str,
+    path: &str,
+    base: Option<Revision>,
+    source: &str,
+    svg: &str,
+) -> Result<(), String> {
+    let svg_full = o.vault.resolve_link(file, path);
+    let src_rel = in_vault(o, &svg_full.with_extension(SOURCE_EXT))?;
+    let svg_rel = in_vault(o, &svg_full)?;
+    o.vault
+        .write_bytes(&src_rel, source.as_bytes(), base)
+        .map_err(|e| match e {
+            WriteError::Stale { .. } => format!(
+                "the .{SOURCE_EXT} file changed since it was opened (another program?); nothing was saved"
+            ),
+            e => e.to_string(),
+        })?;
+    let rev = o.vault.revision(&svg_rel).map_err(|e| e.to_string())?;
+    o.vault
+        .write_bytes(&svg_rel, svg.as_bytes(), rev)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Images, attachments and diagrams.
 fn handle_file(o: &Open, request: Request, emit: &mut dyn FnMut(Event)) {
     let folder = &o.settings.attachments;
     match request {
         Request::LoadImage { file, path } => {
-            let data = read_limited(&o.vault.resolve_link(&file, &path))
-                .ok()
-                .map(Arc::new);
+            let full = o.vault.resolve_link(&file, &path);
+            let fresh = if is_svg(&path) {
+                match regenerate(o, &full) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        emit(Event::Error(format!("{path}: {e}")));
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let data = fresh.or_else(|| read_limited(&full).ok()).map(Arc::new);
             emit(Event::Image { file, path, data });
         }
         Request::Attach { file, name, bytes } => {
@@ -608,39 +730,38 @@ fn handle_file(o: &Open, request: Request, emit: &mut dyn FnMut(Event)) {
                 Err(e) => emit(Event::Error(format!("Couldn't attach {name}: {e}"))),
             }
         }
-        Request::OpenDiagram { file, path } => {
-            let full = o.vault.resolve_link(&file, &path);
-            let read = std::fs::read_to_string(&full)
-                .map_err(|e| e.to_string())
-                .and_then(|svg| crate::diagram::from_svg(&svg).map_err(|e| e.to_string()));
-            match read {
-                Ok(shapes) => emit(Event::Diagram { file, path, shapes }),
-                Err(e) => emit(Event::Error(format!("{path}: {e}"))),
-            }
-        }
-        Request::SaveDiagram { file, path, svg } => {
+        Request::OpenDiagram { file, path } => match open_diagram(o, &file, &path) {
+            Ok((scene, base)) => emit(Event::Diagram {
+                file,
+                path,
+                scene: Box::new(scene),
+                base,
+            }),
+            Err(e) => emit(Event::Error(format!("{path}: {e}"))),
+        },
+        Request::SaveDiagram {
+            file,
+            path,
+            base,
+            source,
+            svg,
+        } => {
             if let Some(path) = path {
-                let full = o.vault.resolve_link(&file, &path);
-                let saved = o
-                    .vault
-                    .relative_path(&full)
-                    .ok_or_else(|| "only diagrams inside the vault can be saved".to_string())
-                    .and_then(|rel| {
-                        let rev = o.vault.revision(&rel).map_err(|e| e.to_string())?;
-                        o.vault
-                            .write_bytes(&rel, svg.as_bytes(), rev)
-                            .map_err(|e| e.to_string())
-                    });
-                match saved {
-                    Ok(_) => emit(Event::DiagramSaved { file, path }),
+                match save_diagram(o, &file, &path, base, &source, &svg) {
+                    Ok(()) => emit(Event::DiagramSaved { file, path }),
                     Err(e) => emit(Event::Error(format!("Couldn't save {path}: {e}"))),
                 }
             } else {
-                let name = chrono::Local::now()
-                    .format("diagram-%Y%m%d-%H%M%S.svg")
+                let stem = chrono::Local::now()
+                    .format("diagram-%Y%m%d-%H%M%S")
                     .to_string();
-                match o.vault.attach(&file, folder, &name, svg.as_bytes()) {
-                    Ok((_, link)) => emit(Event::Attached { file, link }),
+                let files: [(&str, &[u8]); 2] =
+                    [(SOURCE_EXT, source.as_bytes()), ("svg", svg.as_bytes())];
+                match o.vault.attach_set(&file, folder, &stem, &files) {
+                    Ok(links) => emit(Event::Attached {
+                        file,
+                        link: links.last().cloned().unwrap_or_default(),
+                    }),
                     Err(e) => emit(Event::Error(format!("Couldn't save the diagram: {e}"))),
                 }
             }
@@ -1081,9 +1202,9 @@ mod tests {
     }
 
     #[test]
-    fn images_attachments_and_diagrams() {
+    fn images_and_attachments() {
         let dir = tempfile::tempdir().unwrap();
-        let (h, vault) = opened(dir.path(), &[("notes/a.org", "* one\n")]);
+        let (h, _) = opened(dir.path(), &[("notes/a.org", "* one\n")]);
         let file = || "notes/a.org".to_string();
         h.send(Request::Attach {
             file: file(),
@@ -1126,74 +1247,137 @@ mod tests {
             _ => None,
         });
         assert_eq!(link, "attachments/a/photo.jpg");
-        // A new diagram, then edited and saved over.
-        let shape = crate::diagram::Shape::Rect {
-            x: 0.0,
-            y: 0.0,
-            w: 10.0,
-            h: 10.0,
-            color: "#000000".into(),
-            width: 2.0,
-        };
+    }
+
+    /// Waits for the diagram opened from `link`.
+    fn open_diagram_event(h: &Harness, link: &str) -> (crate::excalidraw::Scene, Option<Revision>) {
+        h.send(Request::OpenDiagram {
+            file: "notes/a.org".into(),
+            path: link.into(),
+        });
+        h.wait(|e| match e {
+            Event::Diagram { scene, base, .. } => Some((*scene, base)),
+            Event::Error(e) => panic!("{e}"),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn diagrams_are_a_source_and_a_generated_svg() {
+        use crate::excalidraw::{Element, Kind, Scene, to_svg};
+        let dir = tempfile::tempdir().unwrap();
+        let (h, vault) = opened(dir.path(), &[("notes/a.org", "* one\n")]);
+        let file = || "notes/a.org".to_string();
+        let mut scene = Scene::new();
+        let mut rect = Element::new(Kind::Rectangle, 0.0, 0.0, "#1e1e1e");
+        rect.width = 10.0;
+        rect.height = 10.0;
+        scene.elements.push(rect);
         h.send(Request::SaveDiagram {
             file: file(),
             path: None,
-            svg: Arc::new(crate::diagram::to_svg(std::slice::from_ref(&shape))),
+            base: None,
+            source: Arc::new(scene.to_json()),
+            svg: Arc::new(to_svg(&scene)),
         });
         let link = h.wait(|e| match e {
             Event::Attached { link, .. } => Some(link),
             Event::Error(e) => panic!("{e}"),
             _ => None,
         });
-        assert!(
-            link.starts_with("attachments/a/diagram-")
-                && std::path::Path::new(&link)
-                    .extension()
-                    .is_some_and(|e| e == "svg"),
-            "{link}"
-        );
-        h.send(Request::OpenDiagram {
-            file: file(),
-            path: link.clone(),
-        });
-        let shapes = h.wait(|e| match e {
-            Event::Diagram { shapes, .. } => Some(shapes),
-            Event::Error(e) => panic!("{e}"),
-            _ => None,
-        });
-        assert_eq!(shapes.len(), 1);
-        let two = vec![shapes[0].clone(), shapes[0].moved(30.0, 0.0)];
+        let stem = link.strip_suffix(".svg").unwrap().to_string();
+        assert!(stem.starts_with("attachments/a/diagram-"), "{link}");
+        let source = vault.join("notes").join(format!("{stem}.excalidraw"));
+        assert!(source.exists());
+        // Edited and saved over: the source first, then the SVG.
+        let (mut scene, base) = open_diagram_event(&h, &link);
+        assert_eq!(scene.elements.len(), 1);
+        let mut moved = scene.elements[0].clone();
+        moved.shift(30.0, 0.0);
+        scene.elements.push(moved);
         h.send(Request::SaveDiagram {
             file: file(),
             path: Some(link.clone()),
-            svg: Arc::new(crate::diagram::to_svg(&two)),
+            base,
+            source: Arc::new(scene.to_json()),
+            svg: Arc::new(to_svg(&scene)),
         });
-        let saved_path = h.wait(|e| match e {
-            Event::DiagramSaved { path, .. } => Some(path),
+        h.wait(|e| match e {
+            Event::DiagramSaved { .. } => Some(()),
             Event::Error(e) => panic!("{e}"),
             _ => None,
         });
-        assert_eq!(saved_path, link);
-        let saved = fs::read_to_string(vault.join("notes").join(&link)).unwrap();
-        assert_eq!(crate::diagram::from_svg(&saved).unwrap().len(), 2);
+        let text = fs::read_to_string(&source).unwrap();
+        assert_eq!(Scene::parse(&text).unwrap().elements.len(), 2);
+        // Saving again from the stale revision is refused.
+        h.send(Request::SaveDiagram {
+            file: file(),
+            path: Some(link.clone()),
+            base,
+            source: Arc::new(scene.to_json()),
+            svg: Arc::new(to_svg(&scene)),
+        });
+        let msg = h.wait(|e| match e {
+            Event::Error(e) => Some(e),
+            Event::DiagramSaved { .. } => panic!("must refuse"),
+            _ => None,
+        });
+        assert!(msg.contains("changed since it was opened"), "{msg}");
+        // Another tool edits the source: the SVG is regenerated on display.
+        thread::sleep(Duration::from_millis(20));
+        let mut outside = Scene::parse(&text).unwrap();
+        outside.elements.truncate(1);
+        fs::write(&source, outside.to_json()).unwrap();
+        h.send(Request::LoadImage {
+            file: file(),
+            path: link.clone(),
+        });
+        let data = h.wait(|e| match e {
+            Event::Image { data, .. } => Some(data),
+            _ => None,
+        });
+        let svg = String::from_utf8(data.unwrap().to_vec()).unwrap();
+        assert_eq!(svg.matches("<rect").count(), 2, "{svg}");
+        let on_disk = fs::read_to_string(vault.join("notes").join(&link)).unwrap();
+        assert_eq!(on_disk, svg);
+        // A missing SVG is made again too.
+        fs::remove_file(vault.join("notes").join(&link)).unwrap();
+        h.send(Request::LoadImage {
+            file: file(),
+            path: link.clone(),
+        });
+        h.wait(|e| match e {
+            Event::Image { data, .. } => Some(data),
+            _ => None,
+        })
+        .expect("regenerated");
+        assert!(vault.join("notes").join(&link).exists());
     }
 
     #[test]
-    fn plain_svgs_are_not_editable() {
+    fn old_blossom_svgs_get_a_source_on_edit() {
         let dir = tempfile::tempdir().unwrap();
-        let (h, vault) = opened(dir.path(), &[("notes/a.org", "* one\n")]);
-        let file = || "notes/a.org".to_string();
-        // A plain SVG can't be edited.
+        let old = "<svg><metadata><blossom-diagram xmlns=\"urn:blossom:diagram\">{\"version\":1,\"shapes\":[{\"kind\":\"rect\",\"x\":16.0,\"y\":16.0,\"w\":80.0,\"h\":40.0,\"color\":\"#1f1f1f\",\"width\":2.0}]}</blossom-diagram></metadata></svg>";
+        let (h, vault) = opened(
+            dir.path(),
+            &[("notes/a.org", "* one\n"), ("notes/old.svg", old)],
+        );
+        let (scene, base) = open_diagram_event(&h, "old.svg");
+        assert_eq!(scene.elements.len(), 1);
+        assert!(base.is_some());
+        let source = fs::read_to_string(vault.join("notes/old.excalidraw")).unwrap();
+        assert!(source.contains("\"type\": \"rectangle\""), "{source}");
+        // A plain SVG has nothing to edit.
         fs::write(vault.join("notes/plain.svg"), "<svg/>").unwrap();
         h.send(Request::OpenDiagram {
-            file: file(),
+            file: "notes/a.org".into(),
             path: "plain.svg".into(),
         });
         let msg = h.wait(|e| match e {
             Event::Error(e) => Some(e),
             _ => None,
         });
-        assert!(msg.contains("wasn't drawn in Blossom"), "{msg}");
+        assert!(msg.contains("no .excalidraw file beside it"), "{msg}");
     }
 
     #[test]

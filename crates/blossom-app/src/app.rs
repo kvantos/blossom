@@ -572,7 +572,12 @@ impl App {
             }
             Message::NewDiagram => {
                 if let Some(f) = self.file.as_ref().filter(|f| f.doc.is_some() && !f.missing) {
-                    self.diagram = Some(DiagramEditor::new(f.path.clone(), None, None, Vec::new()));
+                    self.diagram = Some(DiagramEditor::new(
+                        f.path.clone(),
+                        None,
+                        None,
+                        crate::excalidraw::Scene::new(),
+                    ));
                     self.awaiting = Awaiting::Nothing;
                 }
             }
@@ -588,7 +593,9 @@ impl App {
                     w.send(Request::SaveDiagram {
                         file: d.file.clone(),
                         path: d.link.clone(),
-                        svg: Arc::new(crate::diagram::to_svg(&d.shapes)),
+                        base: d.base,
+                        source: Arc::new(d.scene.to_json()),
+                        svg: Arc::new(crate::excalidraw::to_svg(&d.scene)),
                     });
                     self.awaiting = Awaiting::Diagram;
                 }
@@ -785,16 +792,16 @@ impl App {
                 }
                 self.insert_link(&file, &link);
             }
-            Event::Diagram { file, path, shapes } => {
+            Event::Diagram {
+                file,
+                path,
+                scene,
+                base,
+            } => {
                 if self.shot.as_ref().is_some_and(|p| p.diagram.is_some()) {
                     shot_task = Some(capture());
                 }
-                self.diagram = Some(DiagramEditor::new(
-                    file,
-                    Some(path.clone()),
-                    Some(PathBuf::from(path)),
-                    shapes,
-                ));
+                self.diagram = Some(DiagramEditor::new(file, Some(path), base, *scene));
                 self.awaiting = Awaiting::Nothing;
             }
             Event::DiagramSaved { file, path } => {
@@ -1445,14 +1452,7 @@ impl App {
                     .height(Fill)
                     .style(style::pane),
                 rule::vertical(1),
-                container(draw::view(
-                    d,
-                    Message::Diagram,
-                    Message::DiagramSave,
-                    Message::DiagramCancel
-                ))
-                .width(Fill)
-                .height(Fill),
+                container(draw::view(d)).width(Fill).height(Fill),
             ]
             .height(Fill)
             .into()
@@ -2517,15 +2517,13 @@ mod tests {
         let mut a = loaded("* one\n");
         let _ = a.update(Message::NewDiagram);
         assert!(a.diagram.as_ref().is_some_and(|d| d.link.is_none()));
-        let rect = crate::diagram::Shape::Rect {
-            x: 0.0,
-            y: 0.0,
-            w: 5.0,
-            h: 5.0,
-            color: "#000000".into(),
-            width: 1.0,
-        };
-        let _ = a.update(Message::Diagram(draw::Edit::Add(rect)));
+        let rect = crate::excalidraw::Element::new(
+            crate::excalidraw::Kind::Rectangle,
+            0.0,
+            0.0,
+            "#000000",
+        );
+        let _ = a.update(Message::Diagram(draw::Edit::Add(Box::new(rect))));
         // Cancel with changes asks once.
         let _ = a.update(Message::DiagramCancel);
         assert!(a.diagram.is_some());
@@ -2541,7 +2539,8 @@ mod tests {
         let _ = a.update(Message::Worker(Event::Diagram {
             file: "a.org".into(),
             path: "attachments/a/d.svg".into(),
-            shapes: vec![],
+            scene: Box::default(),
+            base: None,
         }));
         assert!(a.diagram.as_ref().is_some_and(|d| d.link.is_some()));
         let _ = a.update(Message::DiagramCancel);

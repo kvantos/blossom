@@ -385,4 +385,21 @@ fn attachments_are_stored_beside_the_file() {
     assert_eq!(v.relative_path(&full).as_deref(), Some(path.as_str()));
     assert_eq!(v.relative_path(Path::new("/etc/hosts")), None);
     assert!(v.resolve_link("a.org", "/abs/x.png").ends_with("abs/x.png"));
+    // A set shares one free stem.
+    put(r, "notes/attachments/work/flow.excalidraw", "{}");
+    let links = v
+        .attach_set(
+            "notes/work.org",
+            "attachments",
+            "flow",
+            &[("excalidraw", b"{}"), ("svg", b"<svg/>")],
+        )
+        .unwrap();
+    assert_eq!(
+        links,
+        [
+            "attachments/work/flow-1.excalidraw",
+            "attachments/work/flow-1.svg"
+        ]
+    );
 }

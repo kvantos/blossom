@@ -8,6 +8,7 @@ mod app;
 mod diagram;
 mod draw;
 mod editor;
+mod excalidraw;
 mod file;
 mod outline;
 mod panels;

@@ -115,6 +115,52 @@ impl Vault {
         Some(parts?.join("/"))
     }
 
+    /// Stores several files as new attachments of `org_file` sharing one
+    /// name stem, `stem.ext` each, the stem made unique (`stem-1`, …) so
+    /// that none of them exists yet. Written in the given order. Returns
+    /// each file's link path.
+    ///
+    /// # Errors
+    ///
+    /// On I/O errors; files written before the failing one stay.
+    pub fn attach_set(
+        &self,
+        org_file: &str,
+        folder: &str,
+        stem: &str,
+        files: &[(&str, &[u8])],
+    ) -> Result<Vec<String>, WriteError> {
+        let dir = folder_for(org_file, folder);
+        let existing: Vec<String> = match fs::read_dir(self.full_path(&dir)?) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        // A stem is free when no file of the set exists with it: test the
+        // stems against the existing names with each extension stripped.
+        let stems: Vec<String> = existing
+            .iter()
+            .filter_map(|n| {
+                files.iter().find_map(|(ext, _)| {
+                    n.to_lowercase()
+                        .strip_suffix(&format!(".{}", ext.to_lowercase()))
+                        .map(String::from)
+                })
+            })
+            .collect();
+        let stem = unique_name(&stems, &sanitize_name(stem));
+        let mut links = Vec::new();
+        for (ext, bytes) in files {
+            let path = format!("{dir}/{stem}.{ext}");
+            self.write_bytes(&path, bytes, None)?;
+            links.push(relative_link(org_file, &path));
+        }
+        Ok(links)
+    }
+
     /// Stores `bytes` as a new attachment of `org_file` named after `name`
     /// in its attachments folder (`folder`, see [`folder_for`]). Returns the
     /// vault-relative path and the link path to write in `org_file`.
