@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use blossom_core::capture::Target;
 use blossom_core::{Document, Keywords};
-use blossom_index::NoteIndex;
 use blossom_index::agenda::{self, Agenda};
+use blossom_index::{MatchContext, Note, NoteIndex, Query};
 use blossom_vault::config::Template;
 use blossom_vault::ops::{Change, Complete, HeadingRef, OpError, Outcome};
 use blossom_vault::{Revision, Vault, WriteError, config};
@@ -51,6 +51,8 @@ pub struct OpenVault {
     pub archive: String,
     /// Deadline warning days for the agenda.
     pub warning_days: i64,
+    /// Org's default priority, for search's `p.X` and `o.p`.
+    pub default_priority: Option<String>,
     /// Capture templates.
     pub templates: Vec<Template>,
     /// The attachments folder name.
@@ -68,6 +70,7 @@ impl OpenVault {
             index_dir: None,
             archive: config.archive_location().to_string(),
             warning_days: config.warning_days(),
+            default_priority: config.default_priority.clone(),
             attachments: config.attachments_folder().to_string(),
             templates: config.templates().unwrap_or_else(|e| {
                 eprintln!("blossom: {e}; using the built-in capture templates");
@@ -137,6 +140,9 @@ pub enum Request {
     Flush,
     /// Send the agenda for this many days now and after every change.
     Agenda(u32),
+    /// Send the headings matching this query now and after every change;
+    /// an empty query stops that.
+    Search(String),
     /// Send the refile targets.
     Targets,
     /// Run a file operation, after writing waiting saves.
@@ -223,6 +229,8 @@ pub enum Event {
     Missing(String),
     /// The agenda.
     Agenda(Arc<Agenda>),
+    /// Search results.
+    Search(Arc<SearchResults>),
     /// Every heading, for the refile picker.
     Targets(Arc<Vec<RefileTarget>>),
     /// An operation succeeded.
@@ -285,6 +293,7 @@ impl fmt::Debug for Handle {
 }
 
 /// The worker's inbox: UI requests plus watcher notices.
+#[allow(clippy::large_enum_variant)] // each is moved once, never stored
 enum Input {
     Request(Request),
     /// Files changed in the vault opened as `generation`.
@@ -326,6 +335,8 @@ struct Open {
     settings: OpenVault,
     /// Days of agenda to send after every change, once asked for.
     agenda: Option<u32>,
+    /// The search query to answer after every change, once asked for.
+    search: Option<String>,
     generation: u64,
     /// Tells the watcher thread of this vault to stop.
     stop: Arc<AtomicBool>,
@@ -431,7 +442,7 @@ fn run(inbox: &Receiver<Input>, myself: &Sender<Input>, emit: &mut dyn FnMut(Eve
                     Ok(report) => {
                         emit(Event::Files(Arc::new(file_infos(o))));
                         if report.added.len() + report.updated.len() + report.removed.len() > 0 {
-                            emit_agenda(o, emit);
+                            emit_live(o, emit);
                         }
                         if let Some(path) = &loaded {
                             if report.removed.contains(path) {
@@ -485,6 +496,7 @@ fn open_vault(req: &OpenVault, generation: u64, myself: &Sender<Input>) -> Resul
         index,
         settings: req.clone(),
         agenda: None,
+        search: None,
         generation,
         stop,
         pending: BTreeMap::new(),
@@ -517,7 +529,7 @@ fn write_due(o: &mut Open, now: Instant, emit: &mut dyn FnMut(Event)) {
         match o.index.sync(&o.vault) {
             Ok(_) => {
                 emit(Event::Files(Arc::new(file_infos(o))));
-                emit_agenda(o, emit);
+                emit_live(o, emit);
             }
             Err(e) => emit(Event::Error(e.to_string())),
         }
@@ -542,6 +554,10 @@ fn handle_op(o: &mut Open, request: Request, loaded: Option<&str>, emit: &mut dy
         Request::Agenda(days) => {
             o.agenda = Some(days);
             emit_agenda(o, emit);
+        }
+        Request::Search(query) => {
+            o.search = Some(query).filter(|q| !q.trim().is_empty());
+            emit_search(o, emit);
         }
         Request::Targets => emit(Event::Targets(Arc::new(targets(o)))),
         Request::Run(op) => {
@@ -798,12 +814,48 @@ fn after_change(o: &mut Open, paths: &[String], loaded: Option<&str>, emit: &mut
     match o.index.sync(&o.vault) {
         Ok(_) => {
             emit(Event::Files(Arc::new(file_infos(o))));
-            emit_agenda(o, emit);
+            emit_live(o, emit);
         }
         Err(e) => emit(Event::Error(e.to_string())),
     }
     if let Some(l) = loaded.filter(|l| paths.iter().any(|p| p == l)) {
         emit_document(o, l, emit);
+    }
+}
+
+/// After the vault changed: the agenda and search results, if shown.
+fn emit_live(o: &Open, emit: &mut dyn FnMut(Event)) {
+    emit_agenda(o, emit);
+    if o.search.is_some() {
+        emit_search(o, emit);
+    }
+}
+
+/// Headings matching a search, in rank order, with the query they answer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchResults {
+    /// The query as typed.
+    pub query: String,
+    /// The matches.
+    pub notes: Vec<Note>,
+}
+
+fn emit_search(o: &Open, emit: &mut dyn FnMut(Event)) {
+    let Some(query) = &o.search else {
+        emit(Event::Search(Arc::default()));
+        return;
+    };
+    let ctx = MatchContext {
+        now: chrono::Local::now().naive_local(),
+        state_order: o.settings.keywords.all().map(String::from).collect(),
+        default_priority: o.settings.default_priority.clone(),
+    };
+    match o.index.search(&Query::parse(query), &ctx) {
+        Ok(notes) => emit(Event::Search(Arc::new(SearchResults {
+            query: query.clone(),
+            notes,
+        }))),
+        Err(e) => emit(Event::Error(e.to_string())),
     }
 }
 
@@ -1050,6 +1102,58 @@ mod tests {
             text: Arc::new(text.into()),
             base,
         });
+    }
+
+    #[test]
+    fn search_answers_and_stays_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, _vault) = opened(
+            dir.path(),
+            &[
+                (
+                    "a.org",
+                    "* TODO Buy milk
+* Call Bob
+about the milk run
+",
+                ),
+                (
+                    "b.org",
+                    "* Tea :drink:
+",
+                ),
+            ],
+        );
+        let wait_search = || {
+            h.wait(|e| match e {
+                Event::Search(r) => Some(r),
+                Event::Error(e) => panic!("{e}"),
+                _ => None,
+            })
+        };
+        h.send(Request::Search("milk".into()));
+        let r = wait_search();
+        assert_eq!(r.query, "milk");
+        // The title match ranks first.
+        let titles: Vec<&str> = r.notes.iter().map(|n| n.record.title.as_str()).collect();
+        assert_eq!(titles, ["Buy milk", "Call Bob"]);
+        h.send(Request::Search("i.todo".into()));
+        assert_eq!(wait_search().notes.len(), 1);
+        // A change re-sends results for the current query.
+        h.send(Request::Search("milk".into()));
+        wait_search();
+        save(
+            &h,
+            "c.org",
+            "* milk shake
+",
+            None,
+        );
+        h.send(Request::Flush);
+        assert_eq!(wait_search().notes.len(), 3);
+        // An empty query stops it.
+        h.send(Request::Search(String::new()));
+        assert_eq!(wait_search().notes, []);
     }
 
     #[test]

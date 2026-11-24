@@ -48,10 +48,11 @@ use crate::file::{DiskCopy, DiskState, Group, OpenFile, SectionEditor, Selected}
 use crate::outline;
 use crate::panels::{self, CapturePanel, RefilePicker};
 use crate::read::{self, Actions, Ink, Picture};
+use crate::search;
 use crate::shot;
 use crate::style::{self, Chip};
 use crate::tree::{self, FileInfo};
-use crate::worker::{self, Event, Handle, Op, OpenVault, Request};
+use crate::worker::{self, Event, Handle, Op, OpenVault, Request, SearchResults};
 
 /// The section editor's widget id, for focusing it.
 const EDITOR_ID: &str = "section-editor";
@@ -91,6 +92,10 @@ pub struct App {
     view: View,
     /// The latest agenda from the worker.
     agenda: Option<Arc<Agenda>>,
+    /// The search screen's query.
+    search_input: String,
+    /// Results for `search_input`, once they arrive.
+    search: Option<Arc<SearchResults>>,
     /// A heading to select once its file has loaded.
     pending_heading: Option<(String, usize)>,
     /// The last operation's message, and its changes while it can be undone.
@@ -123,6 +128,8 @@ pub enum View {
     Files,
     /// The agenda.
     Agenda,
+    /// The search screen.
+    Search,
 }
 
 /// Everything that can happen.
@@ -188,6 +195,10 @@ pub enum Message {
     Shot(iced::window::Screenshot),
     /// Show the agenda.
     ShowAgenda,
+    /// Show the search screen.
+    ShowSearch,
+    /// The search field changed.
+    SearchInput(String),
     /// Open a file at a heading (from the agenda).
     OpenHeading(String, usize),
     /// Run a file operation in the worker.
@@ -256,6 +267,10 @@ impl App {
         shot: Option<shot::Plan>,
     ) -> (App, Task<Message>) {
         let forced = shot.as_ref().and_then(|p| p.mode);
+        let search_input = shot
+            .as_ref()
+            .and_then(|p| p.search.clone())
+            .unwrap_or_default();
         let app = App {
             mode: forced.unwrap_or(Mode::None),
             worker: None,
@@ -274,13 +289,17 @@ impl App {
             closing: false,
             close_warned: false,
             today,
-            view: if shot.as_ref().is_some_and(|p| p.agenda) {
+            view: if shot.as_ref().is_some_and(|p| p.search.is_some()) {
+                View::Search
+            } else if shot.as_ref().is_some_and(|p| p.agenda) {
                 View::Agenda
             } else {
                 View::Files
             },
             shot,
             agenda: None,
+            search_input,
+            search: None,
             pending_heading: None,
             notice: None,
             capture: None,
@@ -460,6 +479,15 @@ impl App {
                 if let Some(w) = &self.worker {
                     w.send(Request::Agenda(agenda::DAYS));
                 }
+            }
+            Message::ShowSearch => {
+                self.view = View::Search;
+                self.send_search();
+                return iced::widget::operation::focus(search::INPUT);
+            }
+            Message::SearchInput(s) => {
+                self.search_input = s;
+                self.send_search();
             }
             Message::OpenHeading(path, index) => self.open_heading(path, index),
             Message::Run(op) => self.run(op),
@@ -663,6 +691,10 @@ impl App {
                     w.send(Request::Agenda(agenda::DAYS));
                 }
                 self.agenda = None;
+                self.search = None;
+                if self.view == View::Search {
+                    self.send_search();
+                }
                 self.notice = None;
                 self.vault_input = root.display().to_string();
                 self.root = Some(root);
@@ -728,7 +760,11 @@ impl App {
                     return iced::exit();
                 }
             }
-            Event::Agenda(_) | Event::Targets(_) | Event::Done(_) | Event::Restored(_) => {
+            Event::Agenda(_)
+            | Event::Search(_)
+            | Event::Targets(_)
+            | Event::Done(_)
+            | Event::Restored(_) => {
                 return self.on_op_event(event);
             }
             Event::Image { .. }
@@ -754,6 +790,18 @@ impl App {
                     && let Some(plan) = self.shot.clone()
                 {
                     return self.shoot(&plan);
+                }
+            }
+            Event::Search(r) => {
+                if r.query == self.search_input.trim() {
+                    let first = self.search.is_none();
+                    self.search = Some(r);
+                    if first
+                        && self.view == View::Search
+                        && let Some(plan) = self.shot.clone()
+                    {
+                        return self.shoot(&plan);
+                    }
                 }
             }
             Event::Targets(t) => {
@@ -860,6 +908,18 @@ impl App {
         let full = blossom_vault::attach::resolve(root, &f.path, &path);
         if let Err(e) = open_externally(&full.to_string_lossy()) {
             self.status = Some(format!("Couldn't open {path}: {e}"));
+        }
+    }
+
+    /// Ask the worker for results for the search field (and to keep them
+    /// fresh); results for older input are ignored when they arrive.
+    fn send_search(&mut self) {
+        let query = self.search_input.trim();
+        if self.search.as_ref().is_some_and(|r| r.query != query) {
+            self.search = None;
+        }
+        if let Some(w) = &self.worker {
+            w.send(Request::Search(query.to_string()));
         }
     }
 
@@ -1350,6 +1410,9 @@ impl App {
             Key::Character(c) if c.eq_ignore_ascii_case("a") && modifiers.shift() => {
                 return self.update(Message::ShowAgenda);
             }
+            Key::Character(c) if c.eq_ignore_ascii_case("f") && modifiers.shift() => {
+                return self.update(Message::ShowSearch);
+            }
             _ => {}
         }
         Task::none()
@@ -1453,40 +1516,21 @@ impl App {
         let main: Element<'_, Message> = if self.root.is_none() {
             self.welcome()
         } else if let Some(d) = &self.diagram {
-            row![
-                container(self.sidebar())
-                    .width(240)
-                    .height(Fill)
-                    .style(style::pane),
-                rule::vertical(1),
-                container(draw::view(d)).width(Fill).height(Fill),
-            ]
-            .height(Fill)
-            .into()
+            self.beside_sidebar(container(draw::view(d)).width(Fill).height(Fill))
         } else if let Some(panel) = self.panel() {
-            row![
-                container(self.sidebar())
-                    .width(240)
-                    .height(Fill)
-                    .style(style::pane),
-                rule::vertical(1),
-                container(panel).center(Fill),
-            ]
-            .height(Fill)
-            .into()
+            self.beside_sidebar(container(panel).center(Fill))
+        } else if self.view == View::Search {
+            self.beside_sidebar(
+                container(search::view(&self.search_input, self.search.as_deref()))
+                    .width(Fill)
+                    .height(Fill),
+            )
         } else if self.view == View::Agenda {
-            row![
-                container(self.sidebar())
-                    .width(240)
-                    .height(Fill)
-                    .style(style::pane),
-                rule::vertical(1),
+            self.beside_sidebar(
                 container(agenda::view(self.agenda.as_deref(), self.today))
                     .width(Fill)
                     .height(Fill),
-            ]
-            .height(Fill)
-            .into()
+            )
         } else {
             row![
                 container(self.sidebar())
@@ -1582,6 +1626,20 @@ impl App {
         .into()
     }
 
+    /// The sidebar, a divider, then `pane`.
+    fn beside_sidebar<'a>(&'a self, pane: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+        row![
+            container(self.sidebar())
+                .width(240)
+                .height(Fill)
+                .style(style::pane),
+            rule::vertical(1),
+            pane.into(),
+        ]
+        .height(Fill)
+        .into()
+    }
+
     fn sidebar(&self) -> Element<'_, Message> {
         let selected = self.file.as_ref().map(|f| f.path.as_str());
         let rows = tree::rows(&self.files, &self.collapsed_folders)
@@ -1656,6 +1714,11 @@ impl App {
                     .width(Fill)
                     .padding([4, 12])
                     .style(style::row(self.view == View::Agenda)),
+                button(text("Search").size(14))
+                    .on_press(Message::ShowSearch)
+                    .width(Fill)
+                    .padding([4, 12])
+                    .style(style::row(self.view == View::Search)),
                 button(text("Capture…").size(14))
                     .on_press(Message::OpenCapture)
                     .width(Fill)
@@ -2403,6 +2466,30 @@ mod tests {
             .unwrap()
             .text()
             .to_string()
+    }
+
+    #[test]
+    fn search_screen_keeps_only_current_results() {
+        let mut a = loaded("* one\n");
+        let _ = a.update(Message::ShowSearch);
+        assert_eq!(a.view, View::Search);
+        let _ = a.update(Message::SearchInput("on".into()));
+        let _ = a.update(Message::SearchInput("one ".into()));
+        let results = |q: &str| {
+            Message::Worker(Event::Search(Arc::new(SearchResults {
+                query: q.into(),
+                notes: Vec::new(),
+            })))
+        };
+        // Results for earlier typing are dropped; the trimmed query matches.
+        let _ = a.update(results("on"));
+        assert!(a.search.is_none());
+        let _ = a.update(results("one"));
+        assert_eq!(a.search.as_ref().unwrap().query, "one");
+        // Opening a result switches to the file; the query stays.
+        let _ = a.update(Message::OpenHeading("a.org".into(), 0));
+        assert_eq!(a.view, View::Files);
+        assert_eq!(a.search_input, "one ");
     }
 
     #[test]

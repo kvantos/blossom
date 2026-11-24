@@ -158,19 +158,22 @@ Notes from Phase 6:
 
 ## Phase 7: search screen and semantic search
 Agreed with the user 2026-11-24; starts after the dependency upgrade and Linux packages. Keep it simple for end users: no query syntax or config needed to start.
-- [ ] App search screen (plain query language): sidebar "Search", results grouped by file, click opens the heading.
+- [x] App search screen (plain query language): sidebar "Search", results grouped by file, click opens the heading.
 - [ ] `crates/blossom-semantic`: `Embedder` trait, vector store (`<index_dir>/semantic/<id>.bin`, brute-force cosine), incremental sync by text hash, test embedder.
 - [ ] `Query::split_text`: positive plain-text terms become the semantic text; everything else stays a filter.
 - [ ] Built-in model (candle BERT, pinned revision + SHA-256, downloaded to the data dir; feature `builtin-model`) and OpenAI-compatible server backend; `[semantic]` config (`model = english|multilingual|server`, `server`, `server_model`, `api_key_env`).
 - [ ] `blsm search --semantic [--limit N]`, progress on stderr, `index --rebuild` drops vectors.
 - [ ] App "By meaning" switch: model download button, background embedding thread with progress.
 
+Notes from Phase 7:
+- Search screen (`search.rs`): "Search" in the sidebar or Ctrl/Cmd+Shift+F. Each keystroke sends `Request::Search(query)`; the worker answers with `Event::Search(SearchResults { query, notes })` from `NoteIndex::search` (the same matcher and ranking as `blsm search`) and re-sends after every vault change while a query is set (`emit_live`, next to the agenda); the app keeps only results whose query matches the field, so late answers to earlier typing are dropped. Files are listed in order of their best-ranked heading; at most 200 headings are shown, then "and N more". A heading found by its body shows the matching line, cut to 110 characters around the match. The empty field lists clickable examples (`i.todo`, `t.work`, `s.today`, …). `OpenVault` gained `default_priority` for the `MatchContext`. Screenshot hook: `BLOSSOM_SCREENSHOT_SEARCH=<query>`.
+
 ## Later
 Order agreed with the user on 2026-11-24: dependency upgrade, then Linux packages, then semantic search (planned first).
 - [x] `blsm` name-clash check: the user found no `blsm` binary or package on crates.io, AUR, Debian or Homebrew (2026-11-24).
 - [x] rowan/nom upgrade in the orgize fork (before packaging): rowan 0.17, nom 8 (see `crates/orgize/UPSTREAM.md` patch 7); `cargo update` for the rest. tantivy still pulls nom 7 for its own query grammar.
 - [x] Releases (re-scoped with the user 2026-11-24: releases first, then the AUR). A `Makefile` is the one build path (`make`, `make install`/`uninstall` with `PREFIX` (default `~/.local` for a user, `/usr/local` as root; a direct install writes the absolute binary path into the desktop entry)/`DESTDIR`, `dist`, `deb`, `appimage`, `dmg`, `check`); `install` never runs cargo, so `sudo make install` leaves no root-owned files. `.github/workflows/release.yml` builds on a `v*` tag (tag must match the Cargo version) and attaches to a **draft** release: Linux `.tar.gz`, `.deb` and AppImage (built in an `ubuntu:22.04` container, glibc 2.35), Arch `.pkg.tar.zst` (makepkg in `archlinux:base-devel` from `packaging/arch/PKGBUILD`), and two unsigned macOS `.dmg`s (arm64, x86_64; deployment target 11.0), plus `SHA256SUMS`. "Run workflow" builds the same artifacts without a release. App id `io.github.kvantos.Blossom` (desktop entry, AppStream metainfo, Wayland app id, window icon); icon `assets/blossom.svg` with PNGs from `make icons`. Licence is MIT only (the user's choice; Cargo said "MIT OR Apache-2.0"). appimagetool 1.9.1 pinned by SHA-256.
-- [ ] AUR: publish `packaging/arch/PKGBUILD` (fill in the tarball's sha256sum) from the user's AUR account after the first tag.
+- [ ] AUR: publish `packaging/arch/PKGBUILD` (fill in the tarball's sha256sum) from the user's AUR account. *On hold (user, 2026-11-24): distribute as GitHub releases for now; no patch release needed for the `~/Notes` welcome change.*
 - [ ] Flatpak / Flathub, macOS signing and notarization: later, need the user's accounts.
 - [ ] Semantic search: planned with the user, see Phase 7 (after packaging).
 - Postponed: nightly fuzzing. The user doesn't want a nightly toolchain; revisit when `cargo-fuzz` works on stable.

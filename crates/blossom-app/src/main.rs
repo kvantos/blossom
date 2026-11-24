@@ -13,6 +13,7 @@ mod file;
 mod outline;
 mod panels;
 mod read;
+mod search;
 mod shot;
 mod style;
 mod tree;

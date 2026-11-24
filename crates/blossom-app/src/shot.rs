@@ -1,7 +1,8 @@
 //! Developer hook: `BLOSSOM_SCREENSHOT=out.png blossom VAULT` loads the first
 //! file (or `BLOSSOM_SCREENSHOT_FILE`), selects heading
 //! `BLOSSOM_SCREENSHOT_HEADING` if given (opening its editor when
-//! `BLOSSOM_SCREENSHOT_EDIT` is set), saves a screenshot of the window as
+//! `BLOSSOM_SCREENSHOT_EDIT` is set) or shows the search screen for
+//! `BLOSSOM_SCREENSHOT_SEARCH` (a query, may be empty), saves a screenshot of the window as
 //! PNG and exits. `BLOSSOM_THEME=dark|light` overrides the system mode. Used
 //! to check the UI without a screenshot tool; not part of normal use.
 
@@ -23,6 +24,8 @@ pub struct Plan {
     pub edit: bool,
     /// Show the agenda instead of a file.
     pub agenda: bool,
+    /// Show the search screen with this query instead of a file.
+    pub search: Option<String>,
     /// Open the capture panel before capturing.
     pub capture: bool,
     /// Open this diagram (a link path in the file) before capturing.
@@ -47,6 +50,7 @@ impl Plan {
             },
             edit: std::env::var_os("BLOSSOM_SCREENSHOT_EDIT").is_some(),
             agenda: std::env::var_os("BLOSSOM_SCREENSHOT_AGENDA").is_some(),
+            search: std::env::var("BLOSSOM_SCREENSHOT_SEARCH").ok(),
             capture: std::env::var_os("BLOSSOM_SCREENSHOT_CAPTURE").is_some(),
             diagram: std::env::var("BLOSSOM_SCREENSHOT_DIAGRAM").ok(),
         })
