@@ -12,6 +12,11 @@
 //! labelled outline. Blossom draws clean shapes rather than Excalidraw's
 //! hand-drawn look, and writes new elements with `roughness: 0` so
 //! Excalidraw draws them the same way.
+//!
+//! Arrows bind to shapes as in Excalidraw: the arrow's `startBinding` /
+//! `endBinding` name the shape, and the shape lists the arrow in
+//! `boundElements`. Blossom aims a bound end at the shape's centre and stops
+//! it `gap` outside the outline (`focus` 0), whenever either side moves.
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,6 +34,29 @@ pub const COLORS: [&str; 5] = ["#1e1e1e", "#e03131", "#1971c2", "#2f9e44", "#f08
 
 /// A point.
 pub type Point = [f32; 2];
+
+/// Space between a bound arrow's end and the shape, for new bindings.
+const GAP: f32 = 5.0;
+
+/// One end of an arrow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum End {
+    /// The first point.
+    Start,
+    /// The last point.
+    End,
+}
+
+impl End {
+    const BOTH: [End; 2] = [End::Start, End::End];
+
+    fn key(self) -> &'static str {
+        match self {
+            End::Start => "startBinding",
+            End::End => "endBinding",
+        }
+    }
+}
 
 /// What an element is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -508,6 +536,133 @@ impl Element {
         self.height = n * self.font_size * self.line_height;
         self.changed = true;
     }
+
+    /// The id of the element this arrow's `end` is bound to, and the gap.
+    #[must_use]
+    pub fn binding(&self, end: End) -> Option<(String, f32)> {
+        let b = self.raw.get(end.key())?.as_object()?;
+        let id = b.get("elementId")?.as_str()?.to_string();
+        Some((id, f(b, "gap", GAP)))
+    }
+
+    /// Binds `end` to element `id` (aimed at its centre), or unbinds it.
+    /// Fields of an existing binding to the same element are kept.
+    fn set_binding(&mut self, end: End, to: Option<(&str, f32)>) {
+        let v = match to {
+            None => Value::Null,
+            Some((id, gap)) => {
+                let mut b = self
+                    .raw
+                    .get(end.key())
+                    .and_then(Value::as_object)
+                    .filter(|b| b.get("elementId").and_then(Value::as_str) == Some(id))
+                    .cloned()
+                    .unwrap_or_default();
+                b.insert("elementId".into(), json!(id));
+                b.insert("focus".into(), json!(0));
+                b.insert("gap".into(), num(gap));
+                Value::Object(b)
+            }
+        };
+        if self.raw.get(end.key()).unwrap_or(&Value::Null) != &v {
+            self.raw.insert(end.key().into(), v);
+            self.changed = true;
+        }
+    }
+
+    /// The point at `end` of a linear element.
+    fn end_point(&self, end: End) -> Option<Point> {
+        let p = match end {
+            End::Start => self.points.first(),
+            End::End => self.points.last(),
+        }?;
+        Some([self.x + p[0], self.y + p[1]])
+    }
+
+    /// Whether `boundElements` lists `id`.
+    #[must_use]
+    pub fn is_bound(&self, id: &str) -> bool {
+        self.raw
+            .get("boundElements")
+            .and_then(Value::as_array)
+            .is_some_and(|a| {
+                a.iter()
+                    .any(|b| b.get("id").and_then(Value::as_str) == Some(id))
+            })
+    }
+
+    /// Lists `id` (an arrow) in `boundElements`.
+    fn add_bound(&mut self, id: &str) {
+        if self.is_bound(id) {
+            return;
+        }
+        let list = self.raw.entry("boundElements").or_insert_with(|| json!([]));
+        if !list.is_array() {
+            *list = json!([]);
+        }
+        if let Some(a) = list.as_array_mut() {
+            a.push(json!({"id": id, "type": "arrow"}));
+            self.changed = true;
+        }
+    }
+
+    /// Drops `id` from `boundElements`.
+    fn remove_bound(&mut self, id: &str) {
+        if !self.is_bound(id) {
+            return;
+        }
+        if let Some(a) = self
+            .raw
+            .get_mut("boundElements")
+            .and_then(Value::as_array_mut)
+        {
+            a.retain(|b| b.get("id").and_then(Value::as_str) != Some(id));
+            self.changed = true;
+        }
+    }
+
+    /// Whether an arrow can bind to it: a shape, standalone text or an
+    /// element Blossom doesn't draw (image, frame, embed).
+    #[must_use]
+    pub fn bindable(&self) -> bool {
+        !self.deleted
+            && !self.kind.is_linear()
+            && (self.kind != Kind::Text || self.container.is_none())
+    }
+
+    /// An elbow arrow, routed at right angles by Excalidraw.
+    fn elbowed(&self) -> bool {
+        self.raw
+            .get("elbowed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Where the line from `from` to its centre crosses its outline, moved
+    /// `gap` outward.
+    #[must_use]
+    pub fn outline_point(&self, from: Point, gap: f32) -> Point {
+        let c = self.center();
+        let p = rotate(from, c, -self.angle);
+        let (dx, dy) = (p[0] - c[0], p[1] - c[1]);
+        let len = dx.hypot(dy);
+        if len < 1e-3 {
+            return from;
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        let (x0, y0, x1, y1) = self.local_bounds();
+        let (hw, hh) = (((x1 - x0) / 2.0).max(0.5), ((y1 - y0) / 2.0).max(0.5));
+        let t = match self.kind {
+            Kind::Ellipse => 1.0 / ((ux / hw).powi(2) + (uy / hh).powi(2)).sqrt(),
+            Kind::Diamond => 1.0 / (ux.abs() / hw + uy.abs() / hh),
+            _ => (hw / ux.abs()).min(hh / uy.abs()),
+        };
+        rotate(
+            [c[0] + ux * (t + gap), c[1] + uy * (t + gap)],
+            c,
+            self.angle,
+        )
+    }
 }
 
 /// Never reached: [`Element::new`] always builds a valid object.
@@ -698,6 +853,233 @@ impl Scene {
         self.visible()
             .map(|(_, e)| e.bounds())
             .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
+    }
+
+    fn index_of(&self, id: &str) -> Option<usize> {
+        if id.is_empty() {
+            return None;
+        }
+        self.elements.iter().position(|e| e.id == id)
+    }
+
+    /// Indexes of element `i` and the text labelling it (`containerId`).
+    #[must_use]
+    pub fn with_labels(&self, i: usize) -> Vec<usize> {
+        let Some(id) = self.elements.get(i).map(|e| e.id.as_str()) else {
+            return Vec::new();
+        };
+        std::iter::once(i)
+            .chain(
+                self.elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| !id.is_empty() && e.container.as_deref() == Some(id))
+                    .map(|(j, _)| j),
+            )
+            .collect()
+    }
+
+    /// Indexes of what moving element `i` changes: it, its labels, and the
+    /// arrows bound to it with their labels.
+    #[must_use]
+    pub fn affected(&self, i: usize) -> Vec<usize> {
+        let mut out = self.with_labels(i);
+        let Some(id) = self.elements.get(i).map(|e| e.id.clone()) else {
+            return out;
+        };
+        for (j, e) in self.elements.iter().enumerate() {
+            let bound = End::BOTH
+                .iter()
+                .any(|end| e.binding(*end).is_some_and(|(b, _)| b == id));
+            if j != i && bound {
+                out.extend(self.with_labels(j));
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The bindable element `end` of arrow `j` is bound to, and the gap.
+    fn bound_to(&self, j: usize, end: End) -> Option<(usize, f32)> {
+        let (id, gap) = self.elements.get(j)?.binding(end)?;
+        let k = self.index_of(&id)?;
+        (k != j && self.elements[k].bindable()).then_some((k, gap))
+    }
+
+    /// Re-aims the bound ends of arrow `j` at their shapes' centres, moving
+    /// its labels along with its middle.
+    fn route(&mut self, j: usize) {
+        let a = &self.elements[j];
+        if a.kind != Kind::Arrow || a.points.len() < 2 || a.elbowed() {
+            return;
+        }
+        let mut pts = a.absolute_points();
+        let n = pts.len();
+        let (start, end) = (self.bound_to(j, End::Start), self.bound_to(j, End::End));
+        let center =
+            |b: Option<(usize, f32)>, or: Point| b.map_or(or, |(k, _)| self.elements[k].center());
+        // A straight arrow bound at both ends runs centre to centre.
+        let (start_from, end_from) = if n == 2 {
+            (center(end, pts[1]), center(start, pts[0]))
+        } else {
+            (pts[1], pts[n - 2])
+        };
+        if let Some((k, gap)) = start {
+            pts[0] = self.elements[k].outline_point(start_from, gap);
+        }
+        if let Some((k, gap)) = end {
+            pts[n - 1] = self.elements[k].outline_point(end_from, gap);
+        }
+        if pts == a.absolute_points() {
+            return;
+        }
+        let before = a.center();
+        let a = &mut self.elements[j];
+        a.set_points(&pts);
+        for (end, to) in [(End::Start, start), (End::End, end)] {
+            if let (Some((id, gap)), Some(_)) = (a.binding(end), to) {
+                a.set_binding(end, Some((&id, gap)));
+            }
+        }
+        let after = a.center();
+        for l in self.with_labels(j).into_iter().skip(1) {
+            self.elements[l].shift(after[0] - before[0], after[1] - before[1]);
+        }
+    }
+
+    /// Unbinds `end` of arrow `j`, and drops the arrow from the shape's
+    /// list unless its other end is bound there too.
+    fn unbind(&mut self, j: usize, end: End) {
+        let Some((id, _)) = self.elements[j].binding(end) else {
+            return;
+        };
+        self.elements[j].set_binding(end, None);
+        let other = match end {
+            End::Start => End::End,
+            End::End => End::Start,
+        };
+        let still = self.elements[j]
+            .binding(other)
+            .is_some_and(|(b, _)| b == id);
+        if let (false, Some(k)) = (still, self.index_of(&id)) {
+            let arrow = self.elements[j].id.clone();
+            self.elements[k].remove_bound(&arrow);
+        }
+    }
+
+    /// Moves elements `which` by `(dx, dy)`. Arrows bound to them follow; an
+    /// arrow moved itself stays bound only where its end is still within
+    /// `tolerance` of the shape.
+    pub fn move_elements(&mut self, which: &[usize], dx: f32, dy: f32, tolerance: f32) {
+        for &j in which {
+            if let Some(e) = self.elements.get_mut(j) {
+                e.shift(dx, dy);
+            }
+        }
+        let moved: Vec<String> = which
+            .iter()
+            .filter_map(|j| self.elements.get(*j).map(|e| e.id.clone()))
+            .collect();
+        for j in 0..self.elements.len() {
+            if self.elements[j].kind != Kind::Arrow {
+                continue;
+            }
+            let itself = which.contains(&j);
+            for end in End::BOTH {
+                let Some((id, gap)) = self.elements[j].binding(end) else {
+                    continue;
+                };
+                let follows = moved.contains(&id);
+                if itself && !follows {
+                    let p = self.elements[j].end_point(end);
+                    let near = self
+                        .bound_to(j, end)
+                        .zip(p)
+                        .is_some_and(|((k, _), p)| self.elements[k].hit(p, gap + tolerance));
+                    if !near {
+                        self.unbind(j, end);
+                    }
+                } else if follows && !itself && self.elements[j].elbowed() {
+                    // Excalidraw re-routes elbow arrows itself; keep the end on the shape.
+                    let mut pts = self.elements[j].absolute_points();
+                    let i = if end == End::Start {
+                        0
+                    } else {
+                        pts.len().saturating_sub(1)
+                    };
+                    if let Some(p) = pts.get_mut(i) {
+                        *p = [p[0] + dx, p[1] + dy];
+                        self.elements[j].set_points(&pts);
+                    }
+                }
+            }
+            let bound = End::BOTH.iter().any(|end| {
+                self.elements[j]
+                    .binding(*end)
+                    .is_some_and(|(b, _)| moved.contains(&b))
+            });
+            if itself || bound {
+                self.route(j);
+            }
+        }
+    }
+
+    /// Adds `e`. An arrow binds each end to the topmost shape within
+    /// `tolerance` of it (both ends to one shape are not bound twice).
+    pub fn add(&mut self, e: Element, tolerance: f32) {
+        self.elements.push(e);
+        let j = self.elements.len() - 1;
+        if self.elements[j].kind != Kind::Arrow {
+            return;
+        }
+        let arrow = self.elements[j].id.clone();
+        let mut taken = None;
+        for end in End::BOTH {
+            let Some(p) = self.elements[j].end_point(end) else {
+                continue;
+            };
+            let target = self.elements[..j]
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(k, s)| s.bindable() && Some(*k) != taken && s.hit(p, tolerance))
+                .map(|(k, _)| k);
+            if let Some(k) = target {
+                let id = self.elements[k].id.clone();
+                self.elements[j].set_binding(end, Some((&id, GAP)));
+                self.elements[k].add_bound(&arrow);
+                taken = Some(k);
+            }
+        }
+        self.route(j);
+    }
+
+    /// Removes elements `which`, clearing bindings to and from them.
+    pub fn remove(&mut self, which: &[usize]) {
+        let gone: Vec<String> = which
+            .iter()
+            .filter_map(|j| self.elements.get(*j).map(|e| e.id.clone()))
+            .filter(|id| !id.is_empty())
+            .collect();
+        for e in &mut self.elements {
+            for id in &gone {
+                e.remove_bound(id);
+            }
+            for end in End::BOTH {
+                if e.binding(end).is_some_and(|(b, _)| gone.contains(&b)) {
+                    e.set_binding(end, None);
+                }
+            }
+        }
+        let mut which = which.to_vec();
+        which.sort_unstable();
+        which.dedup();
+        for j in which.into_iter().rev() {
+            if j < self.elements.len() {
+                self.elements.remove(j);
+            }
+        }
     }
 
     /// The scene from a Phase 6 SVG's embedded shapes.
@@ -1066,6 +1448,97 @@ mod tests {
         assert_eq!(back["elements"][1], orig["elements"][1]);
         assert!(Scene::parse("{}").is_err());
         assert!(Scene::parse("nope").is_err());
+    }
+
+    fn boxed(x: f32, y: f32) -> Element {
+        let mut e = Element::new(Kind::Rectangle, x, y, COLORS[0]);
+        (e.width, e.height) = (100.0, 50.0);
+        e
+    }
+
+    fn arrow(from: Point, to: Point) -> Element {
+        let mut a = Element::new(Kind::Arrow, 0.0, 0.0, COLORS[0]);
+        a.set_points(&[from, to]);
+        a
+    }
+
+    fn near(p: Point, q: Point) -> bool {
+        (p[0] - q[0]).abs() < 0.01 && (p[1] - q[1]).abs() < 0.01
+    }
+
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn arrows_bind_and_follow_shapes() {
+        let mut s = Scene::new();
+        s.add(boxed(0.0, 0.0), 2.0);
+        s.add(boxed(200.0, 0.0), 2.0);
+        let mut label = Element::new(Kind::Text, 140.0, 15.0, COLORS[0]);
+        s.add(arrow([50.0, 25.0], [250.0, 25.0]), 2.0);
+        let (r, t, a) = (
+            s.elements[0].id.clone(),
+            s.elements[1].id.clone(),
+            s.elements[2].id.clone(),
+        );
+        label.container = Some(a.clone());
+        s.add(label, 2.0);
+        // Bound both ends, stopped GAP outside each outline.
+        assert_eq!(s.elements[2].binding(End::Start), Some((r.clone(), GAP)));
+        assert_eq!(s.elements[2].binding(End::End), Some((t.clone(), GAP)));
+        assert!(s.elements[0].is_bound(&a) && s.elements[1].is_bound(&a));
+        let ends = |s: &Scene| {
+            (
+                s.elements[2].end_point(End::Start).unwrap(),
+                s.elements[2].end_point(End::End).unwrap(),
+            )
+        };
+        assert!(
+            near(ends(&s).0, [105.0, 25.0]) && near(ends(&s).1, [195.0, 25.0]),
+            "{:?}",
+            ends(&s)
+        );
+        // Written as Excalidraw does.
+        let v: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(
+            v["elements"][2]["startBinding"],
+            json!({"elementId": r, "focus": 0, "gap": 5})
+        );
+        assert_eq!(
+            v["elements"][1]["boundElements"],
+            json!([{"id": a, "type": "arrow"}])
+        );
+        // Moving a shape re-aims the arrow; its label moves with the middle.
+        assert_eq!(s.affected(1), vec![1, 2, 3]);
+        s.move_elements(&s.with_labels(1), 0.0, 200.0, 2.0);
+        let (p, q) = ends(&s);
+        assert!(
+            p[1] > 25.0 && near(q, s.elements[1].outline_point(s.elements[0].center(), GAP)),
+            "{p:?} {q:?}"
+        );
+        assert!(s.elements[3].y > 15.0);
+        // A rotated ellipse: the end lies GAP outside its outline.
+        s.elements[1].kind = Kind::Ellipse;
+        s.elements[1].angle = 0.7;
+        s.move_elements(&[1], 0.0, 0.0, 2.0);
+        let q = ends(&s).1;
+        let c = s.elements[1].center();
+        let l = rotate(q, c, -0.7);
+        let (ex, ey) = ((l[0] - c[0]) / (50.0 + GAP), (l[1] - c[1]) / (25.0 + GAP));
+        assert!((ex * ex + ey * ey - 1.0).abs() < 0.1, "{q:?}");
+        // Dragging the arrow off its shapes unbinds it.
+        s.move_elements(&[2], 0.0, 500.0, 2.0);
+        assert_eq!(s.elements[2].binding(End::Start), None);
+        assert!(!s.elements[0].is_bound(&a) && !s.elements[1].is_bound(&a));
+        // Deleting a shape clears the arrow's binding to it.
+        s.elements[2].set_binding(End::End, Some((&t, GAP)));
+        s.remove(&[1]);
+        assert_eq!(s.elements[1].binding(End::End), None);
+        // Deleting an arrow clears the shape's list.
+        let mut s2 = Scene::new();
+        s2.add(boxed(0.0, 0.0), 2.0);
+        s2.add(arrow([50.0, 25.0], [300.0, 25.0]), 2.0);
+        assert!(s2.elements[1].binding(End::End).is_none());
+        s2.remove(&[1]);
+        assert!(!s2.elements[0].is_bound(&a) && s2.elements[0].raw["boundElements"] == json!([]));
     }
 
     #[test]

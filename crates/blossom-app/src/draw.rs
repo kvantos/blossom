@@ -194,9 +194,9 @@ impl DiagramEditor {
         self.dirty
     }
 
-    fn change(&mut self, f: impl FnOnce(&mut Vec<Element>)) {
+    fn change(&mut self, f: impl FnOnce(&mut Scene)) {
         let before = self.scene.elements.clone();
-        f(&mut self.scene.elements);
+        f(&mut self.scene);
         if self.scene.elements != before {
             self.undo.push(before);
             self.redo.clear();
@@ -205,20 +205,9 @@ impl DiagramEditor {
         }
     }
 
-    /// Indexes of `i` and the text elements labelling it.
-    fn with_labels(elements: &[Element], i: usize) -> Vec<usize> {
-        let Some(id) = elements.get(i).map(|e| e.id.clone()) else {
-            return Vec::new();
-        };
-        std::iter::once(i)
-            .chain(
-                elements
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, e)| !id.is_empty() && e.container.as_deref() == Some(id.as_str()))
-                    .map(|(j, _)| j),
-            )
-            .collect()
+    /// How near (scene units) an arrow end must be to a shape to bind.
+    fn bind_tolerance(&self) -> f32 {
+        2.0 * PICK / self.view.zoom
     }
 
     /// Applies an edit.
@@ -235,8 +224,8 @@ impl DiagramEditor {
                 self.color = c.min(COLORS.len() - 1);
                 if let Some(i) = self.selected {
                     let color = COLORS[self.color].to_string();
-                    self.change(|els| {
-                        if let Some(e) = els.get_mut(i) {
+                    self.change(|scene| {
+                        if let Some(e) = scene.elements.get_mut(i) {
                             e.stroke = color;
                             e.changed = true;
                         }
@@ -245,28 +234,23 @@ impl DiagramEditor {
             }
             Edit::Snap => self.snap = !self.snap,
             Edit::Label(l) => self.label = l,
-            Edit::Add(e) => self.change(|els| els.push(*e)),
+            Edit::Add(e) => {
+                let tol = self.bind_tolerance();
+                self.change(|scene| scene.add(*e, tol));
+            }
             Edit::Select(i) => {
                 self.selected = i.filter(|i| *i < self.scene.elements.len());
                 self.cache.clear();
             }
             Edit::Move(i, dx, dy) => {
-                let moving = Self::with_labels(&self.scene.elements, i);
-                self.change(|els| {
-                    for j in moving {
-                        els[j].shift(dx, dy);
-                    }
-                });
+                let moving = self.scene.with_labels(i);
+                let tol = self.bind_tolerance();
+                self.change(|scene| scene.move_elements(&moving, dx, dy, tol));
             }
             Edit::Delete => {
                 if let Some(i) = self.selected.take() {
-                    let mut gone = Self::with_labels(&self.scene.elements, i);
-                    gone.sort_unstable();
-                    self.change(|els| {
-                        for j in gone.into_iter().rev() {
-                            els.remove(j);
-                        }
-                    });
+                    let gone = self.scene.with_labels(i);
+                    self.change(|scene| scene.remove(&gone));
                 }
             }
             Edit::Undo | Edit::Redo => {
@@ -553,7 +537,7 @@ impl canvas::Program<Message> for Board<'_> {
         let ed = self.editor;
         let view = ed.view;
         let hidden: Vec<usize> = match &state.gesture {
-            Gesture::Moving { index, .. } => DiagramEditor::with_labels(&ed.scene.elements, *index),
+            Gesture::Moving { index, .. } => ed.scene.affected(*index),
             _ => Vec::new(),
         };
         let base = ed.cache.draw(renderer, bounds.size(), |frame| {
@@ -588,7 +572,12 @@ impl canvas::Program<Message> for Board<'_> {
                 points,
             } => {
                 if let Some(e) = self.element(*start, *current, points) {
-                    draw_element(&mut over, &e);
+                    // Drawn as it will be added: an arrow snaps to the shapes it binds.
+                    let mut preview = ed.scene.clone();
+                    preview.add(e, ed.bind_tolerance());
+                    if let Some(e) = preview.elements.last() {
+                        draw_element(&mut over, e);
+                    }
                 }
             }
             Gesture::Moving {
@@ -596,13 +585,18 @@ impl canvas::Program<Message> for Board<'_> {
                 start,
                 current,
             } => {
-                let (dx, dy) = (current[0] - start[0], current[1] - start[1]);
+                let mut preview = ed.scene.clone();
+                preview.move_elements(
+                    &ed.scene.with_labels(*index),
+                    current[0] - start[0],
+                    current[1] - start[1],
+                    ed.bind_tolerance(),
+                );
                 for j in &hidden {
-                    let mut e = ed.scene.elements[*j].clone();
-                    e.shift(dx, dy);
-                    draw_element(&mut over, &e);
+                    let e = &preview.elements[*j];
+                    draw_element(&mut over, e);
                     if j == index {
-                        outline(&mut over, &e, view.zoom);
+                        outline(&mut over, e, view.zoom);
                     }
                 }
             }
