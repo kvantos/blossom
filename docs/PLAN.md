@@ -33,6 +33,7 @@ blossom/
 │   ├── blossom-core/       # our org API on top of orgize
 │   ├── blossom-vault/      # folder access, file watching, ignore list, revisions
 │   ├── blossom-index/      # tantivy index and query language
+│   ├── blossom-semantic/   # embeddings and vector store (semantic search)
 │   ├── blsm/               # CLI binary (clap)
 │   └── blossom-app/        # iced GUI binary
 └── fuzz/                   # cargo-fuzz targets (nightly only)
@@ -159,7 +160,7 @@ Notes from Phase 6:
 ## Phase 7: search screen and semantic search
 Agreed with the user 2026-11-24; starts after the dependency upgrade and Linux packages. Keep it simple for end users: no query syntax or config needed to start.
 - [x] App search screen (plain query language): sidebar "Search", results grouped by file, click opens the heading.
-- [ ] `crates/blossom-semantic`: `Embedder` trait, vector store (`<index_dir>/semantic/<id>.bin`, brute-force cosine), incremental sync by text hash, test embedder.
+- [x] `crates/blossom-semantic`: `Embedder` trait, vector store (`<index_dir>/semantic/<id>.bin`, brute-force cosine), incremental sync by text hash, test embedder.
 - [ ] `Query::split_text`: positive plain-text terms become the semantic text; everything else stays a filter.
 - [ ] Built-in model (candle BERT, pinned revision + SHA-256, downloaded to the data dir; feature `builtin-model`) and OpenAI-compatible server backend; `[semantic]` config (`model = english|multilingual|server`, `server`, `server_model`, `api_key_env`).
 - [ ] `blsm search --semantic [--limit N]`, progress on stderr, `index --rebuild` drops vectors.
@@ -167,6 +168,7 @@ Agreed with the user 2026-11-24; starts after the dependency upgrade and Linux p
 
 Notes from Phase 7:
 - Search screen (`search.rs`): "Search" in the sidebar or Ctrl/Cmd+Shift+F. Each keystroke sends `Request::Search(query)`; the worker answers with `Event::Search(SearchResults { query, notes })` from `NoteIndex::search` (the same matcher and ranking as `blsm search`) and re-sends after every vault change while a query is set (`emit_live`, next to the agenda); the app keeps only results whose query matches the field, so late answers to earlier typing are dropped. Files are listed in order of their best-ranked heading; at most 200 headings are shown, then "and N more". A heading found by its body shows the matching line, cut to 110 characters around the match. The empty field lists clickable examples (`i.todo`, `t.work`, `s.today`, …). `OpenVault` gained `default_priority` for the `MatchContext`. Screenshot hook: `BLOSSOM_SCREENSHOT_SEARCH=<query>`.
+- `blossom-semantic` (depends only on `blossom-index`): `Embedder` has `id`, `dims`, `embed_passages` (batched) and `embed_query`, separate because e5/bge word queries and passages differently. `VectorStore` keys each vector by FNV-1a of the heading's text (`passage` = title + body, trimmed), not its position, so inserting a heading embeds only it and equal texts share a vector. `sync(embedder, notes, batch, progress)` drops unused vectors and embeds missing ones a batch at a time; `progress` can return `Break` to stop, keeping what was done (`SyncReport { added, removed, left }`); it doesn't save, `save()` does (temp file + rename). `search(embedder, query, notes, limit)` ranks the given candidate notes by cosine (vectors stored normalised, so a dot product), leaving out notes without a vector. File `<index_dir>/semantic/<id>.bin` (id sanitised): `BLSV`, version 1, dims, id, count, then hash + f32s, little-endian, sorted by hash; a missing, damaged, other-version or other-embedder file means an empty store, rebuilt by the next sync. `TestEmbedder` (bag of hashed words) is public for other crates' tests.
 
 ## Later
 Order agreed with the user on 2026-11-24: dependency upgrade, then Linux packages, then semantic search (planned first).

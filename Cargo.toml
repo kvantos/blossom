@@ -5,6 +5,7 @@ members = [
     "crates/blossom-core",
     "crates/blossom-vault",
     "crates/blossom-index",
+    "crates/blossom-semantic",
     "crates/blsm",
     "crates/blossom-app",
 ]
@@ -21,6 +22,7 @@ orgize = { path = "crates/orgize" }
 blossom-core = { path = "crates/blossom-core" }
 blossom-vault = { path = "crates/blossom-vault" }
 blossom-index = { path = "crates/blossom-index" }
+blossom-semantic = { path = "crates/blossom-semantic" }
 arboard = { version = "3.7", default-features = false, features = ["image-data", "wayland-data-control"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4.6", features = ["derive"] }
