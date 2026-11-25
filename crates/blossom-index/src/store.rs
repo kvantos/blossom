@@ -30,6 +30,9 @@ const SCHEMA_VERSION: u32 = 2;
 const META_FILE: &str = "blossom-index.meta";
 const GRAMS: &str = "grams3";
 const WRITER_MEMORY: usize = 50_000_000;
+/// A subfolder of the index folder that recreating the index leaves alone
+/// (the semantic vectors, see `blossom-semantic`).
+const KEEP: &str = "semantic";
 
 /// An index error.
 #[derive(Debug)]
@@ -116,7 +119,7 @@ impl NoteIndex {
         let meta = format!("{SCHEMA_VERSION}\n{settings}\n");
         let meta_path = dir.join(META_FILE);
         if fs::read_to_string(&meta_path).ok().as_deref() != Some(meta.as_str()) && dir.exists() {
-            fs::remove_dir_all(dir)?;
+            clear_dir(dir)?;
         }
         fs::create_dir_all(dir)?;
         let (schema, fields) = schema();
@@ -401,6 +404,23 @@ impl NoteIndex {
     pub fn count_all(&self) -> Result<usize, IndexError> {
         Ok(self.docs(&AllQuery)?.len())
     }
+}
+
+/// Empties `dir` except [`KEEP`]: the semantic vectors are keyed by text,
+/// stay valid across index versions, and are slow to rebuild.
+fn clear_dir(dir: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_name() == KEEP {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+        } else {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// Filters `notes` with the matcher and sorts them.

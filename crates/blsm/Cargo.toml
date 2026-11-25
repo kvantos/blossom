@@ -7,9 +7,15 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["builtin-model"]
+# The built-in embedding models for `search --semantic` (else only a server).
+builtin-model = ["blossom-semantic/builtin-model"]
+
 [dependencies]
 blossom-core.workspace = true
 blossom-index.workspace = true
+blossom-semantic.workspace = true
 blossom-vault.workspace = true
 chrono = { workspace = true, features = ["clock"] }
 clap.workspace = true

@@ -76,6 +76,19 @@ impl VectorStore {
         index_dir.join("semantic").join(format!("{name}.bin"))
     }
 
+    /// Deletes every store under `index_dir` (all embedders), so the next
+    /// sync embeds everything again. Nothing there is fine.
+    ///
+    /// # Errors
+    ///
+    /// On I/O errors other than the folder missing.
+    pub fn remove_all(index_dir: &Path) -> Result<(), SemanticError> {
+        match fs::remove_dir_all(index_dir.join("semantic")) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
+    }
+
     /// The store for `embedder` under `index_dir`, with whatever vectors
     /// its file holds; empty when the file is missing or unusable.
     #[must_use]
@@ -455,6 +468,10 @@ mod tests {
         sync(&mut s, &e, &n);
         s.save().unwrap();
         assert_eq!(fs::read(&file).unwrap(), bytes);
+        // Removing all stores, twice.
+        VectorStore::remove_all(dir.path()).unwrap();
+        assert!(!file.exists());
+        VectorStore::remove_all(dir.path()).unwrap();
     }
 
     #[test]

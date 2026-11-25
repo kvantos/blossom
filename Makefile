@@ -71,6 +71,7 @@ build:
 check:
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy $(CARGO_FLAGS) --workspace --all-targets -- -D warnings
+	$(CARGO) clippy $(CARGO_FLAGS) -p blsm --no-default-features --all-targets -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) --workspace --all-targets --all-features -- -D warnings
 	$(CARGO) test $(CARGO_FLAGS) --workspace --all-features
 

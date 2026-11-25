@@ -4,6 +4,7 @@
 //! (only changed files are re-read), so results always reflect the files.
 
 mod output;
+mod semantic;
 
 use std::error::Error;
 use std::fmt;
@@ -12,6 +13,7 @@ use std::process::ExitCode;
 
 use blossom_core::{EditError, InsertAt, NewHeading};
 use blossom_index::{MatchContext, NoteIndex, Query, SyncReport, agenda};
+use blossom_semantic::VectorStore;
 use blossom_vault::ops::HeadingRef;
 use blossom_vault::{Vault, WriteError};
 use chrono::NaiveDateTime;
@@ -47,6 +49,15 @@ enum Command {
     /// Search headings, and for plain words also the text before a file's
     /// first heading (Orgzly query syntax, e.g. `i.todo s.today t.work`).
     Search {
+        /// Rank by meaning: plain words find headings about the same thing
+        /// even in other words; filters such as `t.work` still narrow. Uses
+        /// `[semantic]` in the config; the built-in English model (134 MB)
+        /// is downloaded on first use.
+        #[arg(long)]
+        semantic: bool,
+        /// With --semantic, how many headings to show.
+        #[arg(long, default_value_t = 20, value_name = "N")]
+        limit: usize,
         /// The query; several words are joined with spaces.
         query: Vec<String>,
     },
@@ -100,7 +111,7 @@ enum Command {
     },
     /// Update the search index (it is also updated before every command).
     Index {
-        /// Throw the index away and re-read every file.
+        /// Throw the index (and the semantic vectors) away and re-read every file.
         #[arg(long)]
         rebuild: bool,
     },
@@ -147,6 +158,7 @@ struct Session {
     config: Config,
     json: bool,
     report: SyncReport,
+    index_dir: PathBuf,
 }
 
 fn open(cli: &Cli, rebuild: bool) -> Result<Session, Box<dyn Error>> {
@@ -177,6 +189,7 @@ fn open(cli: &Cli, rebuild: bool) -> Result<Session, Box<dyn Error>> {
     let mut index = NoteIndex::open(&index_dir, &settings)?;
     if rebuild {
         index.clear()?;
+        VectorStore::remove_all(&index_dir)?;
     }
     let report = index.sync(&vault)?;
     for c in &report.conflicts {
@@ -203,6 +216,7 @@ fn open(cli: &Cli, rebuild: bool) -> Result<Session, Box<dyn Error>> {
         config,
         json: cli.json,
         report,
+        index_dir,
     })
 }
 
@@ -210,7 +224,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let rebuild = matches!(cli.command, Command::Index { rebuild: true });
     let mut s = open(&cli, rebuild)?;
     match cli.command {
-        Command::Search { query } => {
+        Command::Search {
+            query,
+            semantic: true,
+            limit,
+        } => semantic::search(&s, &query.join(" "), limit),
+        Command::Search { query, .. } => {
             let q = Query::parse(&query.join(" "));
             let hits = s.index.search_with_intros(&q, &s.ctx)?;
             if let Some(days) = q.agenda_days {

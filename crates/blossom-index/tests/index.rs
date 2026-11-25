@@ -287,7 +287,10 @@ fn on_disk_index_persists_and_rebuilds_on_settings_change() {
         assert_eq!(index.all().unwrap().len(), 8, "reopened");
         assert_eq!(index.sync(&vault).unwrap().added.len(), 0);
     }
+    fs::create_dir_all(dir.join("semantic")).unwrap();
+    fs::write(dir.join("semantic/v.bin"), "vectors").unwrap();
     let mut index = NoteIndex::open(&dir, "other settings").unwrap();
+    assert!(dir.join("semantic/v.bin").exists(), "vectors are kept");
     assert_eq!(index.all().unwrap().len(), 0, "rebuilt from scratch");
     assert_eq!(index.sync(&vault).unwrap().added.len(), 2);
     index.clear().unwrap();

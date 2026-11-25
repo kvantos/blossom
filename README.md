@@ -88,6 +88,32 @@ blsm agenda                 # the next 7 days
 blsm capture Buy milk       # a new heading in inbox.org
 ```
 
+### Search by meaning
+
+`blsm search --semantic` finds headings about the same thing even when
+they use other words:
+
+```sh
+blsm search --semantic something to cook tonight
+blsm search --semantic t.work how did the budget meeting go   # filters still narrow
+```
+
+The first time, it downloads a small English model (134 MB) and reads every
+heading once; after that only new and changed headings are read, and a
+search takes a fraction of a second. Everything runs on your computer.
+For notes in other languages, or to use a model you already run, set it in
+`config.toml`:
+
+```toml
+[semantic]
+model = "multilingual"        # about 100 languages (488 MB)
+# or an OpenAI-compatible server, such as Ollama:
+# model = "server"
+# server = "http://localhost:11434/v1"
+# server_model = "nomic-embed-text"
+# api_key_env = "OPENAI_API_KEY"   # the variable that holds the key, if one is needed
+```
+
 ## Licence
 
 MIT, see [LICENSE](LICENSE).

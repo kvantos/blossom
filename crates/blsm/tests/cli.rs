@@ -288,3 +288,152 @@ fn errors_are_reported() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).starts_with("blsm: vault /nonexistent/vault"));
 }
+
+/// A tiny OpenAI-style embeddings server: each text becomes counts of words
+/// from three topics (food, bike, work) plus a constant, so related words
+/// rank together. Runs until the test ends.
+fn embed_server() -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(v) = line.to_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap();
+                }
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let topics: [&[&str]; 3] = [
+                &["milk", "bread", "food", "groceries", "eat"],
+                &["bike", "bicycle", "brake", "chain", "cycling"],
+                &["report", "budget", "meeting", "office"],
+            ];
+            let data: Vec<serde_json::Value> = body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let t = t.as_str().unwrap().to_lowercase();
+                    let mut v: Vec<f32> = topics
+                        .iter()
+                        .map(|words| {
+                            f32::from(
+                                u8::try_from(words.iter().filter(|w| t.contains(**w)).count())
+                                    .unwrap(),
+                            )
+                        })
+                        .collect();
+                    v.push(0.1);
+                    serde_json::json!({"index": i, "embedding": v})
+                })
+                .collect();
+            let json = serde_json::json!({ "data": data }).to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                json.len()
+            )
+            .unwrap();
+        }
+    });
+    url
+}
+
+const MEANING: &str = "\
+* Groceries
+milk and bread
+* Fix the bicycle :work:
+the brake squeaks
+* Quarterly report :work:
+* Ride to the office :work:
+on the bike
+";
+
+fn semantic_env() -> Env {
+    let config = format!(
+        "[semantic]\nmodel = \"server\"\nserver = \"{}\"\nserver_model = \"t\"\n",
+        embed_server()
+    );
+    Env::new(&[("m.org", MEANING)], &config)
+}
+
+#[test]
+fn semantic_search_ranks_by_meaning_and_embeds_once() {
+    let env = semantic_env();
+    let out = env.run(&["search", "--semantic", "something", "to", "eat"]);
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("embedding 4 headings with server-t"),
+        "{stderr}"
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(stdout.lines().next(), Some("m.org:1  Groceries"));
+    // Filters narrow; --limit cuts.
+    assert_eq!(
+        env.ok(&["search", "--semantic", "--limit", "2", "t.work", "cycling"]),
+        "m.org:3  Fix the bicycle  :work:\nm.org:6  Ride to the office  :work:\n"
+    );
+    // Vectors are kept: nothing to embed the second time.
+    let out = env.run(&["search", "--semantic", "eat"]);
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Only a new heading is embedded.
+    fs::write(
+        env.vault().join("m.org"),
+        format!("{MEANING}* Bake bread\n"),
+    )
+    .unwrap();
+    let out = env.run(&["search", "--semantic", "eat"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("embedding 1 heading "));
+    // JSON adds the score.
+    let json: serde_json::Value =
+        serde_json::from_str(&env.ok(&["--json", "search", "--semantic", "bread"])).unwrap();
+    assert_eq!(json[0]["title"], "Bake bread");
+    assert!(json[0]["score"].as_f64().unwrap() > 0.9);
+    // A rebuild drops the vectors too.
+    env.ok(&["index", "--rebuild"]);
+    assert!(!env.dir.path().join("index/semantic").exists());
+    let out = env.run(&["search", "--semantic", "eat"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("embedding 5 headings"));
+}
+
+#[test]
+fn semantic_search_explains_problems() {
+    let env = semantic_env();
+    let out = env.run(&["search", "--semantic", "t.work"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("needs words"));
+    // Nothing listening.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let env = Env::new(
+        &[("m.org", MEANING)],
+        &format!("[semantic]\nmodel = \"server\"\nserver = \"http://127.0.0.1:{port}/v1\"\n"),
+    );
+    let out = env.run(&["search", "--semantic", "eat"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(&format!("127.0.0.1:{port}/v1/embeddings")),
+        "{err}"
+    );
+}

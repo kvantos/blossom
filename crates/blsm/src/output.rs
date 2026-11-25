@@ -89,6 +89,32 @@ pub fn notes(hits: &[Note], json: bool) -> Out {
     if json {
         return print_json(&hits.iter().map(note_json).collect::<Vec<_>>());
     }
+    note_lines(hits.iter())
+}
+
+/// Headings ranked by meaning, best first: the same lines as [`notes`];
+/// in JSON each also has its `score` (cosine similarity, higher is closer).
+pub fn scored(hits: &[(f32, &Note)], json: bool) -> Out {
+    #[derive(Serialize)]
+    struct Scored<'a> {
+        #[serde(flatten)]
+        note: NoteJson<'a>,
+        score: f32,
+    }
+    if json {
+        let value: Vec<Scored> = hits
+            .iter()
+            .map(|(score, n)| Scored {
+                note: note_json(n),
+                score: *score,
+            })
+            .collect();
+        return print_json(&value);
+    }
+    note_lines(hits.iter().map(|(_, n)| *n))
+}
+
+fn note_lines<'a>(hits: impl Iterator<Item = &'a Note>) -> Out {
     let mut out = io::stdout().lock();
     for n in hits {
         let r = &n.record;
