@@ -10,6 +10,7 @@ mod draw;
 mod editor;
 mod excalidraw;
 mod file;
+mod fonts;
 mod meaning;
 mod outline;
 mod panels;
@@ -93,7 +94,7 @@ fn main() -> iced::Result {
                 template.clone(),
                 today,
                 shot.clone(),
-                (saved, settings_path.clone()),
+                (saved.clone(), settings_path.clone()),
             )
         },
         App::update,

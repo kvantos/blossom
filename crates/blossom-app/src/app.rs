@@ -45,15 +45,17 @@ use crate::agenda;
 use crate::draw::{self, DiagramEditor};
 use crate::editor::{self, Command};
 use crate::file::{DiskCopy, DiskState, Group, OpenFile, SectionEditor, Selected};
+use crate::fonts;
 use crate::meaning;
 use crate::outline;
+use crate::panels::Appearance;
 use crate::panels::{self, CapturePanel, RefilePicker};
 use crate::read::{self, Actions, Ink, Picture};
 use crate::search;
 use crate::settings::Settings;
 use crate::shot;
+use crate::style::Colours;
 use crate::style::{self, Chip};
-use crate::style::{Colours, ModeChoice};
 use crate::tree::{self, FileInfo};
 use crate::worker::{self, Event, Handle, Op, OpenVault, Request, SearchResults};
 
@@ -77,6 +79,8 @@ pub struct App {
     settings_path: Option<PathBuf>,
     /// The Appearance panel is open.
     appearance: bool,
+    /// The installed fonts, once read for the Appearance panel.
+    fonts: Option<Arc<fonts::Installed>>,
     worker: Option<Handle>,
     /// A vault to open as soon as the worker is ready.
     pending: Option<OpenVault>,
@@ -234,14 +238,8 @@ pub enum Message {
     DismissNotice,
     /// Open the capture panel.
     OpenCapture,
-    /// Open the Appearance panel.
-    OpenAppearance,
-    /// Close it.
-    CloseAppearance,
-    /// Appearance: which colours.
-    SetColours(Colours),
-    /// Appearance: light, dark or follow the system.
-    SetMode(ModeChoice),
+    /// The Appearance panel.
+    Appearance(Appearance),
     /// Capture: choose a template, by its label.
     CaptureTemplate(String),
     /// Capture: answer prompt N.
@@ -311,6 +309,7 @@ impl App {
             settings,
             settings_path,
             appearance: false,
+            fonts: None,
             worker: None,
             vault_exists: open.is_some() || typed_folder_exists(DEFAULT_FOLDER),
             vault_input: open
@@ -391,20 +390,35 @@ impl App {
     }
 
     /// The Appearance panel's messages.
-    fn on_appearance(&mut self, message: &Message) {
+    fn on_appearance(&mut self, message: Appearance) -> Task<Message> {
+        let mut new = self.settings.clone();
         match message {
-            Message::OpenAppearance => self.appearance = true,
-            Message::CloseAppearance => self.appearance = false,
-            Message::SetColours(colours) => self.set_settings(Settings {
-                colours: *colours,
-                ..self.settings
-            }),
-            Message::SetMode(mode) => self.set_settings(Settings {
-                mode: *mode,
-                ..self.settings
-            }),
-            _ => {}
+            Appearance::Open => {
+                self.appearance = true;
+                if self.fonts.is_none() {
+                    return Task::perform(async { fonts::installed() }, |i| {
+                        Message::Appearance(Appearance::FontsListed(Arc::new(i)))
+                    });
+                }
+                return Task::none();
+            }
+            Appearance::Close => {
+                self.appearance = false;
+                return Task::none();
+            }
+            Appearance::FontsListed(installed) => {
+                self.fonts = Some(installed);
+                return Task::none();
+            }
+            Appearance::Colours(c) => new.colours = c,
+            Appearance::Mode(m) => new.mode = m,
+            Appearance::ReadFont(f) => new.read_font = f.0,
+            Appearance::ReadSize(n) => new.read_size = n,
+            Appearance::EditorFont(f) => new.editor_font = f.0,
+            Appearance::EditorSize(n) => new.editor_size = n,
         }
+        self.set_settings(new);
+        Task::none()
     }
 
     /// Uses and remembers new Appearance choices.
@@ -413,7 +427,7 @@ impl App {
         if let Some(path) = &self.settings_path
             && let Err(e) = self.settings.save(path)
         {
-            self.status = Some(format!("Couldn't save the theme: {e}"));
+            self.status = Some(format!("Couldn't save the appearance settings: {e}"));
         }
     }
 
@@ -460,10 +474,7 @@ impl App {
         match message {
             Message::Worker(event) => return self.on_worker(event),
             Message::Mode(mode) => self.system = mode,
-            m @ (Message::OpenAppearance
-            | Message::CloseAppearance
-            | Message::SetColours(_)
-            | Message::SetMode(_)) => self.on_appearance(&m),
+            Message::Appearance(m) => return self.on_appearance(m),
             Message::VaultInput(s) => {
                 self.vault_input = s;
                 self.vault_exists = typed_folder_exists(&self.vault_input);
@@ -1644,7 +1655,10 @@ impl App {
     /// a text editor's text.
     fn panel(&self) -> Option<Element<'_, Message>> {
         if self.appearance {
-            return Some(panels::appearance_view(&self.settings));
+            return Some(panels::appearance_view(
+                &self.settings,
+                self.fonts.as_deref(),
+            ));
         }
         if let Some(r) = &self.refile {
             return Some(panels::refile_view(r));
@@ -1655,14 +1669,22 @@ impl App {
             .as_ref()
             .and_then(|f| f.doc.as_ref())
             .map_or_else(|| self.template.keywords.clone(), |d| d.keywords().clone());
-        Some(panels::capture_view(p, &self.template.templates, &keywords))
+        Some(panels::capture_view(
+            p,
+            &self.template.templates,
+            &keywords,
+            &self.settings,
+        ))
     }
 
     fn body(&self) -> Element<'_, Message> {
         let main: Element<'_, Message> = if self.root.is_none() && self.appearance {
-            container(panels::appearance_view(&self.settings))
-                .center(Fill)
-                .into()
+            container(panels::appearance_view(
+                &self.settings,
+                self.fonts.as_deref(),
+            ))
+            .center(Fill)
+            .into()
         } else if self.root.is_none() {
             self.welcome()
         } else if let Some(d) = &self.diagram {
@@ -1775,7 +1797,7 @@ impl App {
                     .size(12)
                     .style(dim),
                 button(text("Appearance…").size(12))
-                    .on_press(Message::OpenAppearance)
+                    .on_press(Message::Appearance(Appearance::Open))
                     .padding([2, 0])
                     .style(button::text),
             ]
@@ -1890,7 +1912,7 @@ impl App {
             scrollable(Column::with_children(rows).spacing(1).padding([6, 6])).height(Fill),
             rule::horizontal(1),
             button(text("Appearance…").size(12))
-                .on_press(Message::OpenAppearance)
+                .on_press(Message::Appearance(Appearance::Open))
                 .padding([6, 12])
                 .style(button::text),
         ]
@@ -1933,7 +1955,8 @@ impl App {
                 .into(),
             );
         }
-        let ink = self.ink();
+        // The outline keeps the app's font; the Appearance fonts are the note's.
+        let ink = self.ink().ui();
         for r in outline::rows(doc, &f.folded) {
             let Some(h) = doc.heading(r.index) else {
                 continue;
@@ -2027,7 +2050,7 @@ impl App {
             (Selected::Heading(i), Some(h)) => {
                 let title = f.titles.get(i).map_or(&[][..], Vec::as_slice);
                 parts.push(heading_toolbar(f, edit_button));
-                parts.push(read::sized(title, 24, ink, Message::Link));
+                parts.push(read::sized(title, ink.size * 8 / 5, ink, Message::Link));
                 parts.push(self.metadata(h, doc));
                 let chips = reader_chips(h, doc, self.today);
                 if !chips.is_empty() {
@@ -2114,14 +2137,21 @@ impl App {
         if let Some(h) = heading {
             parts.push(self.metadata(h, doc));
         }
+        let ink = self.ink();
         parts.push(
             text_editor(&ed.content)
                 .id(EDITOR_ID)
                 .on_action(Message::EditorAction)
-                .highlight_with::<editor::Org>(doc.keywords().clone(), editor::format)
+                .highlight_with::<editor::Org>(
+                    editor::Settings {
+                        keywords: doc.keywords().clone(),
+                        family: ink.code.family,
+                    },
+                    editor::format,
+                )
                 .key_binding(editor::bindings(Message::EditorCommand))
-                .font(Font::MONOSPACE)
-                .size(14)
+                .font(ink.code)
+                .size(self.settings.editor_size)
                 .padding(12)
                 .height(Fill)
                 .style(style::editor)
@@ -2241,7 +2271,7 @@ impl App {
     }
 
     fn ink(&self) -> Ink {
-        Ink::of(&style::theme(self.colours(), self.mode()))
+        Ink::of(&style::theme(self.colours(), self.mode()), &self.settings)
     }
 }
 
@@ -2600,29 +2630,57 @@ mod tests {
 
     #[test]
     fn theme_follows_the_system_unless_chosen() {
+        use crate::style::ModeChoice;
         let mut a = app();
         assert!(a.theme().is_none(), "system mode not known yet");
         let _ = a.update(Message::Mode(Mode::Dark));
         assert_eq!(a.mode(), Mode::Dark);
-        let _ = a.update(Message::SetMode(ModeChoice::Light));
+        let _ = a.update(Message::Appearance(Appearance::Mode(ModeChoice::Light)));
         let _ = a.update(Message::Mode(Mode::Dark));
         assert_eq!(a.mode(), Mode::Light);
-        let _ = a.update(Message::SetColours(Colours::Gray));
+        let _ = a.update(Message::Appearance(Appearance::Colours(Colours::Gray)));
         assert_eq!(a.theme().map(|t| t.to_string()), Some("Gray Light".into()));
-        let _ = a.update(Message::SetMode(ModeChoice::System));
+        let _ = a.update(Message::Appearance(Appearance::Mode(ModeChoice::System)));
         assert_eq!(a.mode(), Mode::Dark);
     }
 
     #[test]
-    fn appearance_choices_are_saved_and_escape_closes_the_panel() {
+    fn font_choices_reach_the_read_view_and_are_saved() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
         let mut a = app();
         a.settings_path = Some(path.clone());
-        let _ = a.update(Message::OpenAppearance);
+        assert_eq!(a.ink().body, Font::DEFAULT);
+        assert_eq!(a.ink().code, Font::MONOSPACE);
+        let _ = a.update(Message::Appearance(Appearance::ReadFont(fonts::Choice(
+            Some("Inter".into()),
+        ))));
+        let _ = a.update(Message::Appearance(Appearance::ReadSize(18)));
+        let _ = a.update(Message::Appearance(Appearance::EditorFont(fonts::Choice(
+            Some("Fira Code".into()),
+        ))));
+        let ink = a.ink();
+        assert_eq!(ink.body.family, iced::font::Family::Name("Inter"));
+        assert_eq!(ink.code.family, iced::font::Family::Name("Fira Code"));
+        assert_eq!(ink.size, 18);
+        assert_eq!(Settings::load(&path).0, a.settings);
+        let _ = a.update(Message::Appearance(Appearance::ReadFont(fonts::Choice(
+            None,
+        ))));
+        assert_eq!(a.ink().body, Font::DEFAULT);
+    }
+
+    #[test]
+    fn appearance_choices_are_saved_and_escape_closes_the_panel() {
+        use crate::style::ModeChoice;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let mut a = app();
+        a.settings_path = Some(path.clone());
+        let _ = a.update(Message::Appearance(Appearance::Open));
         assert!(a.appearance);
-        let _ = a.update(Message::SetColours(Colours::Solarized));
-        let _ = a.update(Message::SetMode(ModeChoice::Dark));
+        let _ = a.update(Message::Appearance(Appearance::Colours(Colours::Solarized)));
+        let _ = a.update(Message::Appearance(Appearance::Mode(ModeChoice::Dark)));
         assert_eq!(Settings::load(&path).0, a.settings);
         let _ = a.update(Message::Key(keyboard::Event::KeyPressed {
             key: Key::Named(keyboard::key::Named::Escape),

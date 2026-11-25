@@ -12,27 +12,46 @@ use iced::widget::{
 };
 use iced::{Color, ContentFit, Element, Fill, Font, Length, Theme, font};
 
-use crate::style;
+use crate::settings::Settings;
+use crate::{fonts, style};
 
-/// Body text size.
-pub const SIZE: u32 = 15;
-
-/// Colours spans need (they are built without the theme).
+/// Colours and fonts spans need (they are built without the theme).
 #[derive(Clone, Copy, Debug)]
 pub struct Ink {
     /// Links.
     pub link: Color,
     /// Timestamps.
     pub date: Color,
+    /// Note text.
+    pub body: Font,
+    /// Code, drawers: the editor's font.
+    pub code: Font,
+    /// Note text size.
+    pub size: u32,
 }
 
 impl Ink {
-    /// The colours of `theme`.
+    /// The colours of `theme` and the fonts of `settings`.
     #[must_use]
-    pub fn of(theme: &Theme) -> Ink {
+    pub fn of(theme: &Theme, settings: &Settings) -> Ink {
         Ink {
             link: style::link(theme),
             date: theme.palette().warning,
+            body: fonts::named(settings.read_font.as_deref(), Font::DEFAULT),
+            code: fonts::named(settings.editor_font.as_deref(), Font::MONOSPACE),
+            size: settings.read_size,
+        }
+    }
+
+    /// The same colours with the app's own fonts and size, for note text
+    /// shown outside the read view (the outline).
+    #[must_use]
+    pub fn ui(self) -> Ink {
+        Ink {
+            body: Font::DEFAULT,
+            code: Font::MONOSPACE,
+            size: 15,
+            ..self
         }
     }
 }
@@ -182,7 +201,8 @@ fn block<'a, M: Clone + 'a>(
                 } else {
                     "•"
                 })
-                .size(SIZE)
+                .size(ink.size)
+                .font(ink.body)
                 .into(),
             };
             row![
@@ -198,7 +218,9 @@ fn block<'a, M: Clone + 'a>(
             language,
             text: code,
         } => {
-            let body = text(code.as_str()).font(Font::MONOSPACE).size(SIZE - 1);
+            let body = text(code.as_str())
+                .font(ink.code)
+                .size(ink.size.saturating_sub(1));
             let content: Element<'a, M> = match language {
                 Some(lang) if !lang.is_empty() => column![
                     text(lang.as_str()).size(11).style(|t: &Theme| text::Style {
@@ -236,8 +258,8 @@ fn block<'a, M: Clone + 'a>(
         Block::Rule => rule::horizontal(1).into(),
         Block::Drawer { name, text: body } => container(
             text(format!(":{name}:\n{body}"))
-                .font(Font::MONOSPACE)
-                .size(SIZE - 2)
+                .font(ink.code)
+                .size(ink.size.saturating_sub(2))
                 .style(|t: &Theme| text::Style {
                     color: Some(style::dim(t)),
                 }),
@@ -252,7 +274,7 @@ pub fn paragraph<'a, M: Clone + 'a>(
     ink: Ink,
     on_link: fn(String) -> M,
 ) -> Element<'a, M> {
-    sized(spans, SIZE, ink, on_link)
+    sized(spans, ink.size, ink, on_link)
 }
 
 /// Styled spans as rich text at `size`.
@@ -277,7 +299,7 @@ fn styled(s: &Span, ink: Ink) -> TextSpan<'_, String, Font> {
         code,
         date,
     } = s.style;
-    let mut font = if code { Font::MONOSPACE } else { Font::DEFAULT };
+    let mut font = if code { ink.code } else { ink.body };
     if bold {
         font.weight = font::Weight::Bold;
     }

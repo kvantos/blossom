@@ -185,11 +185,13 @@ Agreed with the user 2026-11-25: more than the pink, for other tastes.
 - [x] The app remembers the choice in `settings.toml` in the data folder (`settings.rs`); config.toml stays hand-edited, the app never writes it.
 - [x] "Appearance…" panel (sidebar footer and welcome screen), radio buttons, applies at once, Esc closes.
 - [x] Screenshot hook: `BLOSSOM_THEME` takes `light|dark` or `solarized-`/`gray-` + `light|dark`; `BLOSSOM_SCREENSHOT_APPEARANCE=1` opens the panel.
+- [x] Fonts (asked 2026-11-25): a font and size (10–28 px) for the note text (default sans 15 px) and for the editor (default monospace 14 px), from the installed fonts (`fonts.rs`, `fontdb`; monospaced listed first for the editor). Only the note text changes; the outline, sidebar and buttons keep the app's font. Code in notes uses the editor font. The capture editor uses the editor font.
 
 Notes from Phase 8:
 - Solarized uses its canonical colours with blue as the accent; body text is base01 in light and base1 in dark (base00/base0 are too faint for long reading). Gray is neutral greys with a slate-blue accent.
 - A test checks every theme's text contrast is at least 4.5:1.
-- `settings.toml` (`colours = "gray"`, `mode = "dark"`); a missing or broken file gives the defaults (a broken one is reported on stderr). Written via temp file + rename.
+- Fonts: iced needs `'static` family names, so each chosen name is interned (leaked once). The editor's highlighter carries the family in each highlight (`editor::Mark`), because iced's format callback is a plain `fn`. The font list is read on first opening the panel, in a task.
+- `settings.toml` (`colours = "gray"`, `mode = "dark"`, `read_font`, `read_size`, `editor_font`, `editor_size`; sizes clamped); a missing or broken file gives the defaults (a broken one is reported on stderr). Written via temp file + rename.
 
 ## Later
 Order agreed with the user on 2026-11-24: dependency upgrade, then Linux packages, then semantic search (planned first).

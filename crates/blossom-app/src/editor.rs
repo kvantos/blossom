@@ -12,30 +12,49 @@ use iced::{Color, Font, Theme, font};
 
 use crate::style;
 
+/// What the highlighter needs: the TODO keywords and the editor's font
+/// family (bold and italic runs keep it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Settings {
+    /// The file's TODO keywords.
+    pub keywords: Keywords,
+    /// The editor's font family.
+    pub family: font::Family,
+}
+
+/// A highlighted run: what it is, and the family to draw it in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mark {
+    /// What the run is.
+    pub kind: Kind,
+    /// The editor's font family.
+    pub family: font::Family,
+}
+
 /// The highlighter. It keeps the state at the start of every line it has
 /// seen, so a change re-highlights from that line on.
 pub struct Org {
-    keywords: Keywords,
+    settings: Settings,
     /// `states[n]` is the state at the start of line `n`.
     states: Vec<LineState>,
     current: usize,
 }
 
 impl highlighter::Highlighter for Org {
-    type Settings = Keywords;
-    type Highlight = Kind;
-    type Iterator<'a> = std::vec::IntoIter<(Range<usize>, Kind)>;
+    type Settings = Settings;
+    type Highlight = Mark;
+    type Iterator<'a> = std::vec::IntoIter<(Range<usize>, Mark)>;
 
-    fn new(settings: &Keywords) -> Org {
+    fn new(settings: &Settings) -> Org {
         Org {
-            keywords: settings.clone(),
+            settings: settings.clone(),
             states: vec![LineState::default()],
             current: 0,
         }
     }
 
-    fn update(&mut self, settings: &Keywords) {
-        self.keywords = settings.clone();
+    fn update(&mut self, settings: &Settings) {
+        self.settings = settings.clone();
         self.change_line(0);
     }
 
@@ -47,11 +66,15 @@ impl highlighter::Highlighter for Org {
 
     fn highlight_line(&mut self, line: &str) -> Self::Iterator<'_> {
         let mut state = self.states.get(self.current).copied().unwrap_or_default();
-        let runs = highlight::highlight_line(line, &mut state, &self.keywords);
+        let runs = highlight::highlight_line(line, &mut state, &self.settings.keywords);
         self.current += 1;
         self.states.truncate(self.current);
         self.states.push(state);
+        let family = self.settings.family;
         runs.into_iter()
+            .map(|(range, kind)| (range, Mark { kind, family }))
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     fn current_line(&self) -> usize {
@@ -61,7 +84,8 @@ impl highlighter::Highlighter for Org {
 
 /// How a highlight looks in `theme`.
 #[allow(clippy::trivially_copy_pass_by_ref)] // iced fixes the signature
-pub fn format(kind: &Kind, theme: &Theme) -> Format<Font> {
+pub fn format(mark: &Mark, theme: &Theme) -> Format<Font> {
+    let kind = &mark.kind;
     let p = theme.palette();
     let dim = style::dim(theme);
     let bold = Font {
@@ -91,9 +115,9 @@ pub fn format(kind: &Kind, theme: &Theme) -> Format<Font> {
         Kind::Strike | Kind::Underline => (Some(dim), None),
         Kind::Link => (Some(style::link(theme)), None),
     };
-    // The editor is monospace; keep weight and style but not the family.
+    // Keep weight and style but the editor's family.
     let font = font.map(|f| Font {
-        family: Font::MONOSPACE.family,
+        family: mark.family,
         ..f
     });
     Format { color, font }
@@ -186,7 +210,10 @@ mod tests {
 
     #[test]
     fn rehighlights_from_a_changed_line() {
-        let mut h = Org::new(&Keywords::default());
+        let mut h = Org::new(&Settings {
+            keywords: Keywords::default(),
+            family: Font::MONOSPACE.family,
+        });
         let lines = [
             "#+begin_src",
             "* not a heading in a block",
@@ -195,14 +222,14 @@ mod tests {
         ];
         let all: Vec<Vec<Kind>> = lines
             .iter()
-            .map(|l| h.highlight_line(l).map(|(_, k)| k).collect())
+            .map(|l| h.highlight_line(l).map(|(_, m)| m.kind).collect())
             .collect();
         assert_eq!(all[1], [Kind::Block]);
         assert_eq!(all[3][1], Kind::Todo);
         // Line 1 changed: highlighting resumes there with the block state.
         h.change_line(1);
         assert_eq!(h.current_line(), 1);
-        let again: Vec<Kind> = h.highlight_line(lines[1]).map(|(_, k)| k).collect();
+        let again: Vec<Kind> = h.highlight_line(lines[1]).map(|(_, m)| m.kind).collect();
         assert_eq!(again, [Kind::Block]);
     }
 }
