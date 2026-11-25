@@ -48,7 +48,8 @@ INSTALL     ?= install
 
 BINS        := blossom blsm
 
-.PHONY: all build check install uninstall dist deb appimage macos-app dmg icons clean help
+.PHONY: all build check install uninstall dist deb appimage macos-app dmg icons clean help \
+        fuzz-build fuzz fuzz-all fuzz-repro
 
 all: build
 
@@ -63,7 +64,10 @@ help:
 	@echo "  make appimage       AppImage in $(DIST)/ (needs appimagetool)"
 	@echo "  make dmg            macOS .app in a .dmg in $(DIST)/ (on macOS)"
 	@echo "  make clean          remove build output"
-	@echo "Variables: PREFIX DESTDIR TARGET CARGO_FLAGS APPIMAGETOOL"
+	@echo "  make fuzz           fuzz one target (FUZZ=$(FUZZ), SECS=$(SECS)); stable Rust"
+	@echo "  make fuzz-all       fuzz every target ($(FUZZ_TARGETS)) for SECS each"
+	@echo "  make fuzz-repro     replay a crash: FUZZ=splice CRASH=fuzz/artifacts/splice/crash-..."
+	@echo "Variables: PREFIX DESTDIR TARGET CARGO_FLAGS APPIMAGETOOL FUZZ SECS"
 
 build:
 	$(CARGO) build --release $(CARGO_FLAGS) $(TARGET_FLAG) -p blossom-app -p blsm
@@ -74,6 +78,50 @@ check:
 	$(CARGO) clippy $(CARGO_FLAGS) -p blsm -p blossom-app --no-default-features --all-targets -- -D warnings
 	$(CARGO) clippy $(CARGO_FLAGS) --workspace --all-targets --all-features -- -D warnings
 	$(CARGO) test $(CARGO_FLAGS) --workspace --all-features
+
+# Fuzzing on stable Rust. The targets in fuzz/ use libFuzzer (from
+# libfuzzer-sys, built with the system's C++ compiler); the flags are
+# cargo-fuzz's coverage instrumentation without its sanitizer, the one part
+# that needs nightly. Our crates have no unsafe code and every check is an
+# assert, so the sanitizer would mostly watch dependencies.
+FUZZ         ?= roundtrip
+FUZZ_TARGETS := roundtrip splice document
+SECS         ?= 60
+FUZZ_TRIPLE  := $(shell rustc -vV | sed -n 's/^host: //p')
+FUZZ_TARGET_DIR := fuzz/target
+FUZZ_BIN     := $(FUZZ_TARGET_DIR)/$(FUZZ_TRIPLE)/release
+FUZZ_SEEDS   := crates/blossom-core/tests/fixtures
+FUZZ_RUSTFLAGS := -Cpasses=sancov-module \
+  -Cllvm-args=-sanitizer-coverage-level=4 \
+  -Cllvm-args=-sanitizer-coverage-inline-8bit-counters \
+  -Cllvm-args=-sanitizer-coverage-pc-table \
+  -Cllvm-args=-sanitizer-coverage-trace-compares \
+  --cfg fuzzing -Cdebug-assertions -Coverflow-checks
+ifeq ($(OS),Linux)
+  FUZZ_RUSTFLAGS += -Cllvm-args=-sanitizer-coverage-stack-depth
+endif
+
+# --target keeps the instrumentation off build scripts, which would not link.
+fuzz-build:
+	RUSTFLAGS="$(FUZZ_RUSTFLAGS) $(RUSTFLAGS)" CARGO_TARGET_DIR=$(FUZZ_TARGET_DIR) \
+	  $(CARGO) build --release $(CARGO_FLAGS) --manifest-path fuzz/Cargo.toml \
+	  --target $(FUZZ_TRIPLE) --bins
+
+# The corpus grows in fuzz/corpus/FUZZ (seeded from the test fixtures);
+# a failing input is saved in fuzz/artifacts/FUZZ/.
+fuzz: fuzz-build
+	mkdir -p fuzz/corpus/$(FUZZ) fuzz/artifacts/$(FUZZ)
+	$(FUZZ_BIN)/$(FUZZ) -max_total_time=$(SECS) -print_final_stats=1 \
+	  -artifact_prefix=fuzz/artifacts/$(FUZZ)/ fuzz/corpus/$(FUZZ) $(FUZZ_SEEDS)
+
+fuzz-all: fuzz-build
+	for t in $(FUZZ_TARGETS); do \
+	  $(MAKE) --no-print-directory fuzz FUZZ=$$t SECS=$(SECS) || exit 1; \
+	done
+
+fuzz-repro: fuzz-build
+	@test -n "$(CRASH)" || { echo "usage: make fuzz-repro FUZZ=splice CRASH=fuzz/artifacts/splice/crash-..." >&2; exit 1; }
+	$(FUZZ_BIN)/$(FUZZ) "$(CRASH)"
 
 # The built binaries must exist; install doesn't build (see the top).
 $(RELEASE)/blossom $(RELEASE)/blsm:

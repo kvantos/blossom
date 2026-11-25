@@ -1,5 +1,6 @@
-# cargo-fuzz targets. Not a workspace member: running them needs nightly
-# (`cargo +nightly fuzz run roundtrip`), which requires rustup.
+# libFuzzer targets, built and run on stable Rust by `make fuzz` (see the
+# Makefile; no nightly or cargo-fuzz needed). Not a workspace member, so
+# the main build never compiles libFuzzer's C++.
 [package]
 name = "blossom-fuzz"
 version = "0.0.0"
@@ -12,6 +13,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 orgize = { path = "../crates/orgize" }
+blossom-core = { path = "../crates/blossom-core" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 # Detach from the parent workspace.
 [workspace]
@@ -27,6 +30,13 @@ bench = false
 [[bin]]
 name = "splice"
 path = "fuzz_targets/splice.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "document"
+path = "fuzz_targets/document.rs"
 test = false
 doc = false
 bench = false

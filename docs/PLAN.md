@@ -36,7 +36,7 @@ blossom/
 │   ├── blossom-semantic/   # embeddings and vector store (semantic search)
 │   ├── blsm/               # CLI binary (clap)
 │   └── blossom-app/        # iced GUI binary
-└── fuzz/                   # cargo-fuzz targets (nightly only)
+└── fuzz/                   # libFuzzer targets, run on stable (`make fuzz`)
 ```
 
 ## 2. Quality rules
@@ -55,7 +55,7 @@ blossom/
 - [x] 0.6 Round-trip test `tests/roundtrip.rs`: raw bytes, `to_org() == s`, report first differing offset.
 - [x] 0.7 Edit test: deterministic ranges, `replace_range` == naive splice == fresh parse.
 - [x] 0.8 proptest grammar-based round-trip and splice properties.
-- [x] 0.9 cargo-fuzz targets `roundtrip`, `splice` (run requires nightly via rustup, user approval). *(Targets in `fuzz/`, `cargo check` passes on stable; not yet run.)*
+- [x] 0.9 cargo-fuzz targets `roundtrip`, `splice` (run requires nightly via rustup, user approval). *(Targets in `fuzz/`; since 2026-11-25 they run on stable with `make fuzz`, see "Fuzzing on stable" under Later.)*
 - [x] 0.10 Round-trip failures fixed in the fork, with regression fixtures. Done when all pass. *(Two fork bugs fixed, see `crates/orgize/UPSTREAM.md` patches 4–5.)*
 
 ## Phase 1: `blossom-core`
@@ -201,7 +201,7 @@ Order agreed with the user on 2026-11-24: dependency upgrade, then Linux package
 - [ ] AUR: publish `packaging/arch/PKGBUILD` (fill in the tarball's sha256sum) from the user's AUR account. *On hold (user, 2026-11-24): distribute as GitHub releases for now; no patch release needed for the `~/Notes` welcome change.*
 - [ ] Flatpak / Flathub, macOS signing and notarization: later, need the user's accounts.
 - [ ] Semantic search: planned with the user, see Phase 7 (after packaging).
-- Postponed: nightly fuzzing. The user doesn't want a nightly toolchain; revisit when `cargo-fuzz` works on stable.
+- [x] Fuzzing on stable (asked 2026-11-25; the user doesn't want nightly). No cargo-fuzz: the `fuzz/` crate keeps `libfuzzer-sys` (its C++ built with the system compiler, fuzz build only), and `make fuzz` builds it with cargo-fuzz's coverage flags (`-Cpasses=sancov-module` and the `sanitizer-coverage` options, all stable) minus `-Zsanitizer`, the nightly part; `--target <host>` keeps them off build scripts. Targets: `roundtrip`, `splice` (orgize) and `document` (blossom-core: `Document` splices and one of 20 edits against a fresh parse, a refused edit leaves the text alone, render and highlight). `make fuzz [FUZZ=… SECS=…]`, `make fuzz-all`, `make fuzz-repro FUZZ=… CRASH=…`; corpus in `fuzz/corpus/<target>` seeded from the test fixtures, failures in `fuzz/artifacts/<target>/` (both git-ignored), builds in `fuzz/target`. CI's `fuzz` job runs each for 60 s on Linux with the corpus cached between runs and uploads failures. Without AddressSanitizer a memory bug in a dependency's `unsafe` code (memchr, jetscii, rowan, bytecount) that doesn't panic would go unnoticed; our crates forbid `unsafe`. Checked: coverage grows (`document` reaches about 5,500 edges in 20 s) and a planted panic is saved and fails the run.
 
 ## Review fixes (2026-11-25)
 A code review with the user (vault, core edits, index, semantic, app saving, blsm); the orgize fork, the diagram editor and view code were not reviewed.

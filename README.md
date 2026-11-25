@@ -60,7 +60,8 @@ and icons so Blossom appears in your app launcher. No `sudo` is needed. If
 - To remove it: `make uninstall` (or `sudo make uninstall`, the same way you installed).
 - To build packages yourself: `make dist` (tarball), `make deb`, `make appimage`
   (needs `appimagetool`), or `make dmg` on macOS. `make help` lists everything.
-- To run the checks CI runs: `make check`.
+- To run the checks CI runs: `make check`. To fuzz the parser and the
+  editing code (stable Rust plus a C++ compiler): `make fuzz-all SECS=60`.
 
 Without `make`, `cargo install --locked --path crates/blossom-app` and
 `cargo install --locked --path crates/blsm` install the two programs into
