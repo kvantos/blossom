@@ -291,12 +291,52 @@ impl DiagramEditor {
     }
 }
 
-/// `#rrggbb` as a colour; black when it doesn't parse.
-fn rgb(hex: &str) -> Color {
-    let v =
-        u32::from_str_radix(hex.trim_start_matches('#').get(..6).unwrap_or(""), 16).unwrap_or(0);
+/// A CSS colour as Excalidraw stores it: `#rgb`, `#rrggbb`, `#rrggbbaa`,
+/// `transparent` or one of CSS's basic names; black when it doesn't parse.
+fn rgb(css: &str) -> Color {
+    let css = css.trim();
+    let named = match css.to_ascii_lowercase().as_str() {
+        "transparent" => return Color::TRANSPARENT,
+        "black" => "000000",
+        "white" => "ffffff",
+        "red" => "ff0000",
+        "green" => "008000",
+        "blue" => "0000ff",
+        "yellow" => "ffff00",
+        "orange" => "ffa500",
+        "purple" => "800080",
+        "gray" | "grey" => "808080",
+        "silver" => "c0c0c0",
+        "maroon" => "800000",
+        "olive" => "808000",
+        "lime" => "00ff00",
+        "aqua" | "cyan" => "00ffff",
+        "teal" => "008080",
+        "navy" => "000080",
+        "fuchsia" | "magenta" => "ff00ff",
+        _ => "",
+    };
+    let hex = if named.is_empty() {
+        css.strip_prefix('#').filter(|h| h.is_ascii()).unwrap_or("")
+    } else {
+        named
+    };
+    let digits: String = match hex.len() {
+        // `#rgb` doubles each digit.
+        3 | 4 => hex.chars().take(3).flat_map(|c| [c, c]).collect(),
+        6 | 8 => hex[..6].to_string(),
+        _ => String::new(),
+    };
+    let alpha = if hex.len() == 8 {
+        u8::from_str_radix(&hex[6..], 16).map_or(1.0, |a| f32::from(a) / 255.0)
+    } else if hex.len() == 4 {
+        u8::from_str_radix(&hex[3..].repeat(2), 16).map_or(1.0, |a| f32::from(a) / 255.0)
+    } else {
+        1.0
+    };
+    let v = u32::from_str_radix(&digits, 16).unwrap_or(0);
     let [_, r, g, b] = v.to_be_bytes();
-    Color::from_rgb8(r, g, b)
+    Color::from_rgb8(r, g, b).scale_alpha(alpha)
 }
 
 fn snap(p: Point, on: bool) -> Point {
@@ -974,5 +1014,11 @@ mod tests {
         assert!((before[0] - after[0]).abs() < 1e-4 && (before[1] - after[1]).abs() < 1e-4);
         assert_eq!(snap([14.0, 16.0], true), [10.0, 20.0]);
         assert_eq!(rgb("#e03131"), Color::from_rgb8(0xe0, 0x31, 0x31));
+        assert_eq!(rgb("#e31"), Color::from_rgb8(0xee, 0x33, 0x11));
+        assert_eq!(rgb("Red"), Color::from_rgb8(0xff, 0, 0));
+        assert_eq!(rgb("#00000080").a, 128.0 / 255.0);
+        assert_eq!(rgb("transparent"), Color::TRANSPARENT);
+        assert_eq!(rgb("#a日本b"), Color::from_rgb8(0, 0, 0));
+        assert_eq!(rgb("nonsense"), Color::from_rgb8(0, 0, 0));
     }
 }

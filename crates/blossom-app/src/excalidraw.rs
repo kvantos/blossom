@@ -417,7 +417,8 @@ impl Element {
         Value::Object(m)
     }
 
-    /// The box of its own coordinates, ignoring rotation.
+    /// The box of its own coordinates, ignoring rotation. A negative width
+    /// or height (written by some tools) extends left or up.
     #[must_use]
     pub fn local_bounds(&self) -> (f32, f32, f32, f32) {
         if self.kind.is_linear() && !self.points.is_empty() {
@@ -430,7 +431,13 @@ impl Element {
             }
             return (self.x + x0, self.y + y0, self.x + x1, self.y + y1);
         }
-        (self.x, self.y, self.x + self.width, self.y + self.height)
+        let (x1, y1) = (self.x + self.width, self.y + self.height);
+        (
+            self.x.min(x1),
+            self.y.min(y1),
+            self.x.max(x1),
+            self.y.max(y1),
+        )
     }
 
     /// The rotation centre.
@@ -770,6 +777,9 @@ pub struct Scene {
     pub raw: Map<String, Value>,
     /// The elements, bottom first.
     pub elements: Vec<Element>,
+    /// Entries of `elements` that aren't elements Blossom can read (no
+    /// `type`): kept and written back after the others, never shown.
+    pub unread: Vec<Value>,
 }
 
 impl Default for Scene {
@@ -793,6 +803,7 @@ impl Scene {
         Scene {
             raw: raw.as_object().cloned().unwrap_or_default(),
             elements: Vec::new(),
+            unread: Vec::new(),
         }
     }
 
@@ -807,14 +818,23 @@ impl Scene {
         if raw.get("type").and_then(Value::as_str) != Some("excalidraw") {
             return Err("not an Excalidraw file".into());
         }
-        let elements = raw
+        let (mut elements, mut unread) = (Vec::new(), Vec::new());
+        for v in raw
             .get("elements")
             .and_then(Value::as_array)
-            .map_or_else(Vec::new, |a| {
-                a.iter().filter_map(Element::from_json).collect()
-            });
+            .map_or(&[][..], Vec::as_slice)
+        {
+            match Element::from_json(v) {
+                Some(e) => elements.push(e),
+                None => unread.push(v.clone()),
+            }
+        }
         raw.insert("elements".into(), json!([]));
-        Ok(Scene { raw, elements })
+        Ok(Scene {
+            raw,
+            elements,
+            unread,
+        })
     }
 
     /// The file text, indented as Excalidraw writes it.
@@ -823,7 +843,13 @@ impl Scene {
         let mut raw = self.raw.clone();
         raw.insert(
             "elements".into(),
-            Value::Array(self.elements.iter().map(Element::to_json).collect()),
+            Value::Array(
+                self.elements
+                    .iter()
+                    .map(Element::to_json)
+                    .chain(self.unread.iter().cloned())
+                    .collect(),
+            ),
         );
         let mut out = serde_json::to_string_pretty(&Value::Object(raw)).unwrap_or_default();
         out.push('\n');
@@ -847,11 +873,13 @@ impl Scene {
             .to_string()
     }
 
-    /// The box around every visible element.
+    /// The box around every visible element (leaving out any whose size
+    /// isn't a finite number, from a damaged file).
     #[must_use]
     pub fn bounds(&self) -> Option<(f32, f32, f32, f32)> {
         self.visible()
             .map(|(_, e)| e.bounds())
+            .filter(|b| [b.0, b.1, b.2, b.3].iter().all(|v| v.is_finite()))
             .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
     }
 
@@ -1159,8 +1187,16 @@ impl Scene {
 
 // --- SVG ---
 
+/// `s` escaped for XML text, without the characters XML 1.0 forbids
+/// (control characters other than tab and line breaks, U+FFFE, U+FFFF),
+/// which would make the whole SVG unreadable.
 fn xml_text(s: &str) -> String {
-    s.replace('&', "&amp;")
+    s.chars()
+        .filter(|&c| {
+            matches!(c, '\t' | '\n' | '\r') || (c >= ' ' && c != '\u{fffe}' && c != '\u{ffff}')
+        })
+        .collect::<String>()
+        .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
@@ -1169,8 +1205,9 @@ fn xml_attr(s: &str) -> String {
     xml_text(s).replace('"', "&quot;")
 }
 
-/// A number for SVG: at most two decimals.
+/// A number for SVG: at most two decimals; `0` for a non-finite one.
 fn n(v: f32) -> String {
+    let v = if v.is_finite() { v } else { 0.0 };
     let s = format!("{v:.2}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".into() } else { s.to_string() }
@@ -1183,8 +1220,8 @@ pub fn to_svg(scene: &Scene) -> String {
     let (x0, y0, x1, y1) = scene.bounds().unwrap_or((0.0, 0.0, 120.0, 60.0));
     let (vx, vy) = (x0 - MARGIN, y0 - MARGIN);
     let (w, h) = (
-        (x1 - x0 + 2.0 * MARGIN).ceil(),
-        (y1 - y0 + 2.0 * MARGIN).ceil(),
+        (x1 - x0 + 2.0 * MARGIN).ceil().max(1.0),
+        (y1 - y0 + 2.0 * MARGIN).ceil().max(1.0),
     );
     let mut out = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -1539,6 +1576,38 @@ mod tests {
         assert!(s2.elements[1].binding(End::End).is_none());
         s2.remove(&[1]);
         assert!(!s2.elements[0].is_bound(&a) && s2.elements[0].raw["boundElements"] == json!([]));
+    }
+
+    #[test]
+    fn odd_files_still_make_readable_svg() {
+        let text = r#"{"type": "excalidraw", "elements": [
+            {"id": "t", "type": "text", "x": 10, "y": 10, "width": -40, "height": -20,
+             "text": "nul\u0000 and \u0001 bell\ttab", "fontSize": 20},
+            {"id": "big", "type": "rectangle", "x": 0, "y": 0, "width": 1e39, "height": 5},
+            {"no": "type"},
+            42
+        ]}"#;
+        let scene = Scene::parse(text).unwrap();
+        assert_eq!(scene.elements.len(), 2);
+        let svg = to_svg(&scene);
+        assert!(!svg.contains('\u{0}') && !svg.contains('\u{1}'));
+        assert!(svg.contains("nul and  bell\ttab"));
+        assert!(!svg.contains("inf") && !svg.contains("NaN"));
+        assert_eq!(
+            scene.bounds(),
+            Some((-30.0, -10.0, 10.0, 10.0)),
+            "the endless box is left out"
+        );
+        // A negative size extends left and up, for drawing and hit-testing.
+        let t = &scene.elements[0];
+        assert_eq!(t.local_bounds(), (-30.0, -10.0, 10.0, 10.0));
+        assert!(t.hit([0.0, 0.0], 0.0));
+        // What Blossom can't read is written back, not dropped.
+        let again: Value = serde_json::from_str(&scene.to_json()).unwrap();
+        let els = again["elements"].as_array().unwrap();
+        assert_eq!(els.len(), 4);
+        assert_eq!(els[2], json!({"no": "type"}));
+        assert_eq!(els[3], json!(42));
     }
 
     #[test]
