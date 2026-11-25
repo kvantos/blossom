@@ -45,6 +45,7 @@ use crate::agenda;
 use crate::draw::{self, DiagramEditor};
 use crate::editor::{self, Command};
 use crate::file::{DiskCopy, DiskState, Group, OpenFile, SectionEditor, Selected};
+use crate::meaning;
 use crate::outline;
 use crate::panels::{self, CapturePanel, RefilePicker};
 use crate::read::{self, Actions, Ink, Picture};
@@ -64,6 +65,7 @@ const NONE: &str = "—";
 const DEFAULT_FOLDER: &str = "~/Notes";
 
 /// The app.
+#[allow(clippy::struct_excessive_bools)] // independent switches
 pub struct App {
     mode: Mode,
     worker: Option<Handle>,
@@ -96,6 +98,10 @@ pub struct App {
     search_input: String,
     /// Results for `search_input`, once they arrive.
     search: Option<Arc<SearchResults>>,
+    /// The search screen's "By meaning" switch.
+    search_meaning: bool,
+    /// How search by meaning is getting on, once started.
+    meaning: Option<meaning::Status>,
     /// What to select once its file has loaded: a heading or the intro.
     pending_heading: Option<(String, Selected)>,
     /// The last operation's message, and its changes while it can be undone.
@@ -199,6 +205,14 @@ pub enum Message {
     ShowSearch,
     /// The search field changed.
     SearchInput(String),
+    /// The "By meaning" switch changed.
+    SearchMeaning(bool),
+    /// Download the model for search by meaning.
+    DownloadModel,
+    /// Stop that download.
+    CancelDownload,
+    /// Try search by meaning again.
+    RetryMeaning,
     /// Open a file at a heading (from the agenda or search).
     OpenHeading(String, usize),
     /// Open a file at its intro, the text before the first heading (from search).
@@ -273,6 +287,7 @@ impl App {
             .as_ref()
             .and_then(|p| p.search.clone())
             .unwrap_or_default();
+        let search_meaning = shot.as_ref().is_some_and(|p| p.meaning);
         let app = App {
             mode: forced.unwrap_or(Mode::None),
             worker: None,
@@ -302,6 +317,8 @@ impl App {
             agenda: None,
             search_input,
             search: None,
+            search_meaning,
+            meaning: None,
             pending_heading: None,
             notice: None,
             capture: None,
@@ -491,6 +508,14 @@ impl App {
                 self.search_input = s;
                 self.send_search();
             }
+            Message::SearchMeaning(on) => {
+                self.search_meaning = on;
+                self.send_search();
+                return iced::widget::operation::focus(search::INPUT);
+            }
+            Message::DownloadModel => self.send(Request::DownloadModel),
+            Message::CancelDownload => self.send(Request::CancelDownload),
+            Message::RetryMeaning => self.send(Request::RetryMeaning),
             Message::OpenHeading(path, index) => self.open_at(path, Selected::Heading(index)),
             Message::OpenIntro(path) => self.open_at(path, Selected::Intro),
             Message::Run(op) => self.run(op),
@@ -562,7 +587,8 @@ impl App {
                 {
                     eprintln!("blossom: screenshot: {e}");
                 }
-                return iced::exit();
+                // Through the normal close, so the worker saves first.
+                return self.close();
             }
             other => return self.update_files(other),
         }
@@ -695,6 +721,7 @@ impl App {
                 }
                 self.agenda = None;
                 self.search = None;
+                self.meaning = None;
                 if self.view == View::Search {
                     self.send_search();
                 }
@@ -754,6 +781,7 @@ impl App {
             }
             Event::Agenda(_)
             | Event::Search(_)
+            | Event::Meaning(_)
             | Event::Targets(_)
             | Event::Done(_)
             | Event::Restored(_) => {
@@ -784,9 +812,28 @@ impl App {
                     return self.shoot(&plan);
                 }
             }
+            Event::Meaning(status) => {
+                let first = self.meaning.is_none();
+                let waiting = matches!(
+                    status,
+                    meaning::Status::NeedsDownload { .. } | meaning::Status::Failed(_)
+                );
+                self.meaning = Some(status);
+                if first
+                    && waiting
+                    && self.view == View::Search
+                    && let Some(plan) = self.shot.clone()
+                {
+                    return self.shoot(&plan);
+                }
+            }
             Event::Search(r) => {
-                if r.query == self.search_input.trim() {
-                    let first = self.search.is_none();
+                if r.query == self.search_input.trim() && r.meaning == self.search_meaning {
+                    // By meaning, early answers may be empty while it reads.
+                    let first = self.search.is_none()
+                        || (r.meaning
+                            && self.search.as_ref().is_some_and(|s| s.notes.is_empty())
+                            && !r.notes.is_empty());
                     self.search = Some(r);
                     if first
                         && self.view == View::Search
@@ -903,15 +950,30 @@ impl App {
         }
     }
 
+    /// Sends `request` to the worker, if it is running.
+    fn send(&self, request: Request) {
+        if let Some(w) = &self.worker {
+            w.send(request);
+        }
+    }
+
     /// Ask the worker for results for the search field (and to keep them
     /// fresh); results for older input are ignored when they arrive.
     fn send_search(&mut self) {
         let query = self.search_input.trim();
-        if self.search.as_ref().is_some_and(|r| r.query != query) {
+        let meaning = self.search_meaning;
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|r| r.query != query || r.meaning != meaning)
+        {
             self.search = None;
         }
         if let Some(w) = &self.worker {
-            w.send(Request::Search(query.to_string()));
+            w.send(Request::Search {
+                query: query.to_string(),
+                meaning,
+            });
         }
     }
 
@@ -1532,9 +1594,14 @@ impl App {
             self.beside_sidebar(container(panel).center(Fill))
         } else if self.view == View::Search {
             self.beside_sidebar(
-                container(search::view(&self.search_input, self.search.as_deref()))
-                    .width(Fill)
-                    .height(Fill),
+                container(search::view(
+                    &self.search_input,
+                    self.search_meaning,
+                    self.meaning.as_ref(),
+                    self.search.as_deref(),
+                ))
+                .width(Fill)
+                .height(Fill),
             )
         } else if self.view == View::Agenda {
             self.beside_sidebar(
@@ -2489,7 +2556,7 @@ mod tests {
         let results = |q: &str| {
             Message::Worker(Event::Search(Arc::new(SearchResults {
                 query: q.into(),
-                notes: Vec::new(),
+                ..SearchResults::default()
             })))
         };
         // Results for earlier typing are dropped; the trimmed query matches.
@@ -2497,6 +2564,19 @@ mod tests {
         assert!(a.search.is_none());
         let _ = a.update(results("one"));
         assert_eq!(a.search.as_ref().unwrap().query, "one");
+        // By meaning: only results by meaning count.
+        let _ = a.update(Message::SearchMeaning(true));
+        assert!(a.search.is_none(), "words results are dropped");
+        let _ = a.update(results("one"));
+        assert!(a.search.is_none());
+        let _ = a.update(Message::Worker(Event::Search(Arc::new(SearchResults {
+            query: "one".into(),
+            meaning: true,
+            ..SearchResults::default()
+        }))));
+        assert!(a.search.as_ref().unwrap().meaning);
+        let _ = a.update(Message::Worker(Event::Meaning(meaning::Status::Ready)));
+        assert_eq!(a.meaning, Some(meaning::Status::Ready));
         // Opening a result switches to the file; the query stays.
         let _ = a.update(Message::OpenHeading("a.org".into(), 0));
         assert_eq!(a.view, View::Files);

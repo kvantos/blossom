@@ -90,17 +90,19 @@ blsm capture Buy milk       # a new heading in inbox.org
 
 ### Search by meaning
 
-`blsm search --semantic` finds headings about the same thing even when
-they use other words:
+In the app, turn on **By meaning** on the search screen. It finds headings
+about the same thing even when they use other words. The first time, it
+offers to download a small English model (134 MB), then reads your notes
+once in the background. From the command line, `blsm search --semantic`
+does the same:
 
 ```sh
 blsm search --semantic something to cook tonight
 blsm search --semantic t.work how did the budget meeting go   # filters still narrow
 ```
 
-The first time, it downloads a small English model (134 MB) and reads every
-heading once; after that only new and changed headings are read, and a
-search takes a fraction of a second. Everything runs on your computer.
+`blsm` downloads the model without asking. After the first time only new
+and changed headings are read, and a search takes a fraction of a second. Everything runs on your computer.
 For notes in other languages, or to use a model you already run, set it in
 `config.toml`:
 

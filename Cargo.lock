@@ -580,6 +580,7 @@ dependencies = [
  "arboard",
  "blossom-core",
  "blossom-index",
+ "blossom-semantic",
  "blossom-vault",
  "chrono",
  "iced",

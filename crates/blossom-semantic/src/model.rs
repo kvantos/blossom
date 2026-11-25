@@ -115,6 +115,21 @@ impl Model {
         }
     }
 
+    /// The name to show people: `English` or `multilingual`.
+    #[must_use]
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Model::English => "English",
+            Model::Multilingual => "multilingual",
+        }
+    }
+
+    /// Total download size in whole MB, rounded (134 for English).
+    #[must_use]
+    pub fn download_mb(self) -> u64 {
+        (self.download_size() + 500_000) / 1_000_000
+    }
+
     /// Total download size in bytes.
     #[must_use]
     pub fn download_size(self) -> u64 {
@@ -191,6 +206,8 @@ mod tests {
             Path::new("/d/models/multilingual-e5-small-614241f")
         );
         assert_eq!(Model::English.download_size(), 134_178_443);
+        assert_eq!(Model::English.download_mb(), 134);
+        assert_eq!(Model::Multilingual.download_mb(), 488);
         for m in Model::ALL {
             for f in m.files() {
                 assert_eq!(f.sha256.len(), 64);

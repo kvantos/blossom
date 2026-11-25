@@ -67,8 +67,8 @@ fn embedder(backend: &Backend) -> Result<SharedEmbedder, Box<dyn Error>> {
 fn download(m: blossom_semantic::Model, data_dir: &std::path::Path) -> Result<(), Box<dyn Error>> {
     eprintln!(
         "blsm: downloading the {} model ({} MB, only once) to {}",
-        m.name(),
-        m.download_size().div_ceil(1_000_000),
+        m.display_name(),
+        m.download_mb(),
         m.dir(data_dir).display()
     );
     let mut meter = Meter::new();
@@ -77,7 +77,7 @@ fn download(m: blossom_semantic::Model, data_dir: &std::path::Path) -> Result<()
             format!(
                 "blsm: downloaded {} of {} MB",
                 p.done / 1_000_000,
-                p.total.div_ceil(1_000_000)
+                m.download_mb()
             )
         });
         ControlFlow::Continue(())

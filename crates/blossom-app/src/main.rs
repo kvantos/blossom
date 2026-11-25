@@ -10,6 +10,7 @@ mod draw;
 mod editor;
 mod excalidraw;
 mod file;
+mod meaning;
 mod outline;
 mod panels;
 mod read;

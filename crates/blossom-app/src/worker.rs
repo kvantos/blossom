@@ -22,12 +22,13 @@ use blossom_core::capture::Target;
 use blossom_core::{Document, Keywords};
 use blossom_index::agenda::{self, Agenda};
 use blossom_index::{MatchContext, Note, NoteIndex, Query};
-use blossom_vault::config::Template;
+use blossom_vault::config::{SemanticConfig, Template};
 use blossom_vault::ops::{Change, Complete, HeadingRef, OpError, Outcome};
 use blossom_vault::{Revision, Vault, WriteError, config};
 use iced::futures::{SinkExt, StreamExt};
 use iced::{Subscription, futures};
 
+use crate::meaning::{self, Meaning};
 use crate::tree::FileInfo;
 
 /// How long the watcher waits for a burst of changes to settle.
@@ -57,6 +58,10 @@ pub struct OpenVault {
     pub templates: Vec<Template>,
     /// The attachments folder name.
     pub attachments: String,
+    /// `[semantic]`: how to search by meaning.
+    pub semantic: SemanticConfig,
+    /// Where the built-in models live; `None` for the platform data folder.
+    pub data_dir: Option<PathBuf>,
 }
 
 impl OpenVault {
@@ -72,6 +77,8 @@ impl OpenVault {
             warning_days: config.warning_days(),
             default_priority: config.default_priority.clone(),
             attachments: config.attachments_folder().to_string(),
+            semantic: config.semantic.clone(),
+            data_dir: None,
             templates: config.templates().unwrap_or_else(|e| {
                 eprintln!("blossom: {e}; using the built-in capture templates");
                 config::Config::default().templates().unwrap_or_default()
@@ -120,6 +127,7 @@ pub struct RefileTarget {
 
 /// A request from the UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // each is moved once, never stored
 pub enum Request {
     /// Open a vault (closing any open one).
     Open(OpenVault),
@@ -141,8 +149,20 @@ pub enum Request {
     /// Send the agenda for this many days now and after every change.
     Agenda(u32),
     /// Send the headings matching this query now and after every change;
-    /// an empty query stops that.
-    Search(String),
+    /// an empty query stops that. `meaning` ranks them by meaning instead
+    /// (in the background; see [`crate::meaning`]).
+    Search {
+        /// The query as typed.
+        query: String,
+        /// Rank by meaning.
+        meaning: bool,
+    },
+    /// Download the built-in model for search by meaning.
+    DownloadModel,
+    /// Stop that download.
+    CancelDownload,
+    /// Try search by meaning again after it failed.
+    RetryMeaning,
     /// Send the refile targets.
     Targets,
     /// Run a file operation, after writing waiting saves.
@@ -231,6 +251,8 @@ pub enum Event {
     Agenda(Arc<Agenda>),
     /// Search results.
     Search(Arc<SearchResults>),
+    /// How search by meaning is getting on.
+    Meaning(meaning::Status),
     /// Every heading, for the refile picker.
     Targets(Arc<Vec<RefileTarget>>),
     /// An operation succeeded.
@@ -298,6 +320,8 @@ enum Input {
     Request(Request),
     /// Files changed in the vault opened as `generation`.
     Changed(u64),
+    /// An event from the meaning thread of the vault opened as `generation`.
+    Meaning(u64, Event),
 }
 
 /// The subscription that starts the worker and relays its events.
@@ -337,6 +361,14 @@ struct Open {
     agenda: Option<u32>,
     /// The search query to answer after every change, once asked for.
     search: Option<String>,
+    /// Whether that search is by meaning.
+    by_meaning: bool,
+    /// The meaning thread, once search by meaning was first asked for.
+    meaning: Option<Meaning>,
+    /// The index folder (the meaning thread keeps its vectors there).
+    index_dir: PathBuf,
+    /// For the meaning thread to reach this worker.
+    myself: Sender<Input>,
     generation: u64,
     /// Tells the watcher thread of this vault to stop.
     stop: Arc<AtomicBool>,
@@ -424,12 +456,18 @@ fn run(inbox: &Receiver<Input>, myself: &Sender<Input>, emit: &mut dyn FnMut(Eve
             Input::Request(Request::Flush) => {
                 if let Some(o) = open.as_mut() {
                     write_due(o, far_future(), emit);
+                    save_vectors(o);
                 }
                 emit(Event::Flushed);
             }
             Input::Request(r) => {
                 if let Some(o) = open.as_mut() {
                     handle_other(o, r, loaded.as_deref(), emit);
+                }
+            }
+            Input::Meaning(g, event) => {
+                if open.as_ref().is_some_and(|o| o.generation == g) {
+                    emit(event);
                 }
             }
             Input::Changed(g) => {
@@ -473,6 +511,7 @@ fn open_vault(req: &OpenVault, generation: u64, myself: &Sender<Input>) -> Resul
         req.keywords.done.join(" ")
     );
     let mut index = NoteIndex::open(&dir, &settings).map_err(|e| e.to_string())?;
+    let index_dir = dir;
     index.sync(&vault).map_err(|e| e.to_string())?;
     let stop = Arc::new(AtomicBool::new(false));
     match vault.watch(DEBOUNCE) {
@@ -497,11 +536,26 @@ fn open_vault(req: &OpenVault, generation: u64, myself: &Sender<Input>) -> Resul
         settings: req.clone(),
         agenda: None,
         search: None,
+        by_meaning: false,
+        meaning: None,
+        index_dir,
+        myself: myself.clone(),
         generation,
         stop,
         pending: BTreeMap::new(),
         written: HashMap::new(),
     })
+}
+
+/// Has the meaning thread save its vectors, waiting a little: it looks at
+/// messages between batches (a download keeps it busy longer; then the
+/// vectors it has are saved when it stops).
+fn save_vectors(o: &Open) {
+    if let Some(m) = &o.meaning {
+        let (tx, rx) = mpsc::channel();
+        m.send(meaning::In::Save(tx));
+        let _ = rx.recv_timeout(Duration::from_secs(5));
+    }
 }
 
 /// A time after every deadline, to write all waiting saves.
@@ -555,8 +609,28 @@ fn handle_op(o: &mut Open, request: Request, loaded: Option<&str>, emit: &mut dy
             o.agenda = Some(days);
             emit_agenda(o, emit);
         }
-        Request::Search(query) => {
+        Request::Search { query, meaning } => {
             o.search = Some(query).filter(|q| !q.trim().is_empty());
+            o.by_meaning = meaning;
+            if !meaning && let Some(m) = &o.meaning {
+                m.send(meaning::In::Ask(None));
+            }
+            emit_search(o, emit);
+        }
+        Request::DownloadModel => {
+            if let Some(m) = &o.meaning {
+                m.send(meaning::In::Download);
+            }
+        }
+        Request::CancelDownload => {
+            if let Some(m) = &o.meaning {
+                m.cancel_download();
+            }
+        }
+        Request::RetryMeaning => {
+            if let Some(m) = &o.meaning {
+                m.send(meaning::In::Retry);
+            }
             emit_search(o, emit);
         }
         Request::Targets => emit(Event::Targets(Arc::new(targets(o)))),
@@ -823,39 +897,99 @@ fn after_change(o: &mut Open, paths: &[String], loaded: Option<&str>, emit: &mut
     }
 }
 
-/// After the vault changed: the agenda and search results, if shown.
-fn emit_live(o: &Open, emit: &mut dyn FnMut(Event)) {
+/// After the vault changed: the agenda and search results, if shown, and
+/// the headings for the meaning thread.
+fn emit_live(o: &mut Open, emit: &mut dyn FnMut(Event)) {
     emit_agenda(o, emit);
+    if let Some(m) = &o.meaning {
+        m.send(meaning::In::Notes(Arc::new(
+            o.index.all().unwrap_or_default(),
+        )));
+    }
     if o.search.is_some() {
         emit_search(o, emit);
     }
 }
 
 /// Headings matching a search, in rank order, with the query they answer.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SearchResults {
     /// The query as typed.
     pub query: String,
-    /// The matches: headings, and file intros (level 0) for plain words.
+    /// Ranked by meaning (else by words).
+    pub meaning: bool,
+    /// The matches: headings, and for words also file intros (level 0).
     pub notes: Vec<Note>,
+    /// By meaning: each note's similarity, higher is closer.
+    pub scores: Vec<f32>,
 }
 
-fn emit_search(o: &Open, emit: &mut dyn FnMut(Event)) {
-    let Some(query) = &o.search else {
+fn emit_search(o: &mut Open, emit: &mut dyn FnMut(Event)) {
+    let Some(query) = o.search.clone() else {
         emit(Event::Search(Arc::default()));
         return;
     };
-    let ctx = MatchContext {
+    if o.by_meaning {
+        ask_meaning(o, &query, emit);
+        return;
+    }
+    match o
+        .index
+        .search_with_intros(&Query::parse(&query), &match_context(o))
+    {
+        Ok(notes) => emit(Event::Search(Arc::new(SearchResults {
+            query,
+            notes,
+            ..SearchResults::default()
+        }))),
+        Err(e) => emit(Event::Error(e.to_string())),
+    }
+}
+
+fn match_context(o: &Open) -> MatchContext {
+    MatchContext {
         now: chrono::Local::now().naive_local(),
         state_order: o.settings.keywords.all().map(String::from).collect(),
         default_priority: o.settings.default_priority.clone(),
+    }
+}
+
+/// Hands a search by meaning to the meaning thread (starting it the first
+/// time): the query's words, and the headings its filters allow. Without
+/// words there is nothing to rank; empty results say so at once.
+fn ask_meaning(o: &mut Open, query: &str, emit: &mut dyn FnMut(Event)) {
+    let (words, filter) = Query::parse(query).split_text();
+    let candidates = match o.index.search(&filter, &match_context(o)) {
+        Ok(c) => c,
+        Err(e) => return emit(Event::Error(e.to_string())),
     };
-    match o.index.search_with_intros(&Query::parse(query), &ctx) {
-        Ok(notes) => emit(Event::Search(Arc::new(SearchResults {
-            query: query.clone(),
-            notes,
-        }))),
-        Err(e) => emit(Event::Error(e.to_string())),
+    if o.meaning.is_none() {
+        let (myself, generation) = (o.myself.clone(), o.generation);
+        let m = Meaning::start(
+            blossom_semantic::Backend::from_config(&o.settings.semantic),
+            o.settings.data_dir.clone().or_else(config::data_dir),
+            o.index_dir.clone(),
+            move |e| drop(myself.send(Input::Meaning(generation, e))),
+        );
+        m.send(meaning::In::Notes(Arc::new(
+            o.index.all().unwrap_or_default(),
+        )));
+        o.meaning = Some(m);
+    }
+    let Some(m) = &o.meaning else { return };
+    if words.is_empty() {
+        m.send(meaning::In::Ask(None));
+        emit(Event::Search(Arc::new(SearchResults {
+            query: query.to_string(),
+            meaning: true,
+            ..SearchResults::default()
+        })));
+    } else {
+        m.send(meaning::In::Ask(Some(meaning::Ask {
+            query: query.to_string(),
+            words,
+            candidates,
+        })));
     }
 }
 
@@ -1131,16 +1265,25 @@ about the milk run
                 _ => None,
             })
         };
-        h.send(Request::Search("milk".into()));
+        h.send(Request::Search {
+            query: "milk".into(),
+            meaning: false,
+        });
         let r = wait_search();
         assert_eq!(r.query, "milk");
         // The title match ranks first.
         let titles: Vec<&str> = r.notes.iter().map(|n| n.record.title.as_str()).collect();
         assert_eq!(titles, ["Buy milk", "Call Bob"]);
-        h.send(Request::Search("i.todo".into()));
+        h.send(Request::Search {
+            query: "i.todo".into(),
+            meaning: false,
+        });
         assert_eq!(wait_search().notes.len(), 1);
         // A change re-sends results for the current query.
-        h.send(Request::Search("milk".into()));
+        h.send(Request::Search {
+            query: "milk".into(),
+            meaning: false,
+        });
         wait_search();
         save(
             &h,
@@ -1156,7 +1299,10 @@ about the milk run
         assert_eq!(r.notes.len(), 4);
         assert_eq!(r.notes.iter().filter(|n| n.record.is_intro()).count(), 1);
         // An empty query stops it.
-        h.send(Request::Search(String::new()));
+        h.send(Request::Search {
+            query: String::new(),
+            meaning: false,
+        });
         assert_eq!(wait_search().notes, []);
     }
 
@@ -1501,5 +1647,233 @@ about the milk run
             _ => None,
         });
         assert!(msg.starts_with("/nonexistent/blossom-vault"), "{msg}");
+    }
+
+    /// A tiny OpenAI-style embeddings server: each text becomes counts of
+    /// words from three topics (food, bike, work) plus a constant.
+    fn embed_server() -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut len = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(v) = line.to_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap();
+                    }
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                let mut body = vec![0; len];
+                reader.read_exact(&mut body).unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let topics: [&[&str]; 3] = [
+                    &["milk", "bread", "food", "eat"],
+                    &["bike", "bicycle", "brake", "cycling"],
+                    &["report", "budget", "office"],
+                ];
+                let data: Vec<serde_json::Value> = body["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let t = t.as_str().unwrap().to_lowercase();
+                        let mut v: Vec<f32> = topics
+                            .iter()
+                            .map(|w| {
+                                f32::from(
+                                    u8::try_from(w.iter().filter(|w| t.contains(**w)).count())
+                                        .unwrap(),
+                                )
+                            })
+                            .collect();
+                        v.push(0.1);
+                        serde_json::json!({"index": i, "embedding": v})
+                    })
+                    .collect();
+                let json = serde_json::json!({ "data": data }).to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    json.len()
+                );
+            }
+        });
+        url
+    }
+
+    fn opened_with(
+        dir: &std::path::Path,
+        files: &[(&str, &str)],
+        semantic: SemanticConfig,
+    ) -> Harness {
+        let vault = dir.join("v");
+        for (p, t) in files {
+            let full = vault.join(p);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, t).unwrap();
+        }
+        let h = Harness::start();
+        h.send(Request::Open(OpenVault {
+            root: vault,
+            keywords: Keywords::default(),
+            index_dir: Some(dir.join("index")),
+            data_dir: Some(dir.join("data")),
+            semantic,
+            ..OpenVault::new(PathBuf::new(), &config::Config::default())
+        }));
+        h.wait(|e| matches!(e, Event::Files(_)).then_some(()));
+        h
+    }
+
+    fn by_meaning(h: &Harness, query: &str) {
+        h.send(Request::Search {
+            query: query.into(),
+            meaning: true,
+        });
+    }
+
+    /// The next results by meaning that aren't empty, as titles.
+    fn meaning_titles(h: &Harness) -> Vec<String> {
+        h.wait(|e| match e {
+            Event::Search(r) if r.meaning && !r.notes.is_empty() => Some(
+                r.notes
+                    .iter()
+                    .map(|n| n.record.title.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            Event::Meaning(meaning::Status::Failed(e)) | Event::Error(e) => panic!("{e}"),
+            _ => None,
+        })
+    }
+
+    fn wait_ready(h: &Harness) {
+        h.wait(|e| match e {
+            Event::Meaning(meaning::Status::Ready) => Some(()),
+            Event::Meaning(meaning::Status::Failed(e)) => panic!("{e}"),
+            _ => None,
+        });
+    }
+
+    #[test]
+    fn meaning_search_embeds_in_the_background_and_stays_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = opened_with(
+            dir.path(),
+            &[(
+                "m.org",
+                "* Groceries\nmilk and bread\n* Fix the bicycle :work:\nthe brake squeaks\n* Quarterly report :work:\n",
+            )],
+            SemanticConfig {
+                model: Some("server".into()),
+                server: Some(embed_server()),
+                server_model: Some("t".into()),
+                api_key_env: None,
+            },
+        );
+        by_meaning(&h, "something to eat");
+        h.wait(|e| matches!(e, Event::Meaning(meaning::Status::Loading)).then_some(()));
+        wait_ready(&h);
+        assert_eq!(meaning_titles(&h)[0], "Groceries");
+        assert!(dir.path().join("index/semantic/server-t.bin").exists());
+        // Filters narrow.
+        by_meaning(&h, "t.work cycling");
+        assert_eq!(meaning_titles(&h), ["Fix the bicycle", "Quarterly report"]);
+        // Without words: empty results at once.
+        by_meaning(&h, "t.work");
+        h.wait(|e| match e {
+            Event::Search(r) if r.meaning && r.query == "t.work" => {
+                assert_eq!(r.notes.len(), 0);
+                Some(())
+            }
+            _ => None,
+        });
+        // A new heading is embedded and found.
+        by_meaning(&h, "bread");
+        meaning_titles(&h);
+        save(&h, "n.org", "* Bake bread\nwith milk\n", None);
+        h.send(Request::Flush);
+        wait_ready(&h);
+        let titles = meaning_titles(&h);
+        assert!(titles.contains(&"Bake bread".to_string()), "{titles:?}");
+        // Back to words: plain results.
+        h.send(Request::Search {
+            query: "bread".into(),
+            meaning: false,
+        });
+        h.wait(|e| match e {
+            Event::Search(r) if !r.meaning => Some(()),
+            _ => None,
+        });
+    }
+
+    #[test]
+    fn meaning_search_reports_problems() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let h = opened_with(
+            dir.path(),
+            &[("m.org", "* a\n")],
+            SemanticConfig {
+                model: Some("server".into()),
+                server: Some(format!("http://127.0.0.1:{port}/v1")),
+                ..SemanticConfig::default()
+            },
+        );
+        by_meaning(&h, "anything");
+        assert!(failed_on(&h).contains("/v1/embeddings"));
+        // Trying again tries again (and fails again).
+        h.send(Request::RetryMeaning);
+        h.wait(|e| matches!(e, Event::Meaning(meaning::Status::Loading)).then_some(()));
+        assert!(failed_on(&h).contains("/v1/embeddings"));
+        // A bad setting is reported straight away.
+        let dir = tempfile::tempdir().unwrap();
+        let h = opened_with(
+            dir.path(),
+            &[("m.org", "* a\n")],
+            SemanticConfig {
+                model: Some("klingon".into()),
+                ..SemanticConfig::default()
+            },
+        );
+        by_meaning(&h, "anything");
+        assert!(failed_on(&h).contains("klingon"));
+    }
+
+    fn failed_on(h: &Harness) -> String {
+        h.wait(|e| match e {
+            Event::Meaning(meaning::Status::Failed(e)) => Some(e),
+            _ => None,
+        })
+    }
+
+    #[cfg(feature = "builtin-model")]
+    #[test]
+    fn meaning_search_offers_the_model_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = opened_with(dir.path(), &[("m.org", "* a\n")], SemanticConfig::default());
+        by_meaning(&h, "anything");
+        let status = h.wait(|e| match e {
+            Event::Meaning(s) => Some(s),
+            _ => None,
+        });
+        assert_eq!(
+            status,
+            meaning::Status::NeedsDownload {
+                model: "English".into(),
+                mb: 134
+            }
+        );
     }
 }

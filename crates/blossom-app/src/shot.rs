@@ -2,7 +2,8 @@
 //! file (or `BLOSSOM_SCREENSHOT_FILE`), selects heading
 //! `BLOSSOM_SCREENSHOT_HEADING` if given (opening its editor when
 //! `BLOSSOM_SCREENSHOT_EDIT` is set) or shows the search screen for
-//! `BLOSSOM_SCREENSHOT_SEARCH` (a query, may be empty), saves a screenshot of the window as
+//! `BLOSSOM_SCREENSHOT_SEARCH` (a query, may be empty; by meaning with
+//! `BLOSSOM_SCREENSHOT_MEANING`), saves a screenshot of the window as
 //! PNG and exits. `BLOSSOM_THEME=dark|light` overrides the system mode. Used
 //! to check the UI without a screenshot tool; not part of normal use.
 
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// What the hook should capture.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // independent options
 pub struct Plan {
     /// Where to write the PNG.
     pub out: PathBuf,
@@ -26,6 +28,8 @@ pub struct Plan {
     pub agenda: bool,
     /// Show the search screen with this query instead of a file.
     pub search: Option<String>,
+    /// With the "By meaning" switch on.
+    pub meaning: bool,
     /// Open the capture panel before capturing.
     pub capture: bool,
     /// Open this diagram (a link path in the file) before capturing.
@@ -51,6 +55,7 @@ impl Plan {
             edit: std::env::var_os("BLOSSOM_SCREENSHOT_EDIT").is_some(),
             agenda: std::env::var_os("BLOSSOM_SCREENSHOT_AGENDA").is_some(),
             search: std::env::var("BLOSSOM_SCREENSHOT_SEARCH").ok(),
+            meaning: std::env::var_os("BLOSSOM_SCREENSHOT_MEANING").is_some(),
             capture: std::env::var_os("BLOSSOM_SCREENSHOT_CAPTURE").is_some(),
             diagram: std::env::var("BLOSSOM_SCREENSHOT_DIAGRAM").ok(),
         })
