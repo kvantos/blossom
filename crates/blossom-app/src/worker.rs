@@ -836,7 +836,7 @@ fn emit_live(o: &Open, emit: &mut dyn FnMut(Event)) {
 pub struct SearchResults {
     /// The query as typed.
     pub query: String,
-    /// The matches.
+    /// The matches: headings, and file intros (level 0) for plain words.
     pub notes: Vec<Note>,
 }
 
@@ -850,7 +850,7 @@ fn emit_search(o: &Open, emit: &mut dyn FnMut(Event)) {
         state_order: o.settings.keywords.all().map(String::from).collect(),
         default_priority: o.settings.default_priority.clone(),
     };
-    match o.index.search(&Query::parse(query), &ctx) {
+    match o.index.search_with_intros(&Query::parse(query), &ctx) {
         Ok(notes) => emit(Event::Search(Arc::new(SearchResults {
             query: query.clone(),
             notes,
@@ -1145,12 +1145,16 @@ about the milk run
         save(
             &h,
             "c.org",
-            "* milk shake
+            "oat milk
+* milk shake
 ",
             None,
         );
         h.send(Request::Flush);
-        assert_eq!(wait_search().notes.len(), 3);
+        // The new heading, and the file's intro.
+        let r = wait_search();
+        assert_eq!(r.notes.len(), 4);
+        assert_eq!(r.notes.iter().filter(|n| n.record.is_intro()).count(), 1);
         // An empty query stops it.
         h.send(Request::Search(String::new()));
         assert_eq!(wait_search().notes, []);

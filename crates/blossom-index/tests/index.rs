@@ -339,3 +339,50 @@ fn narrowing_matches_full_scan_on_fixtures() {
     }
     assert!(checked > 30, "only {checked} terms checked");
 }
+
+/// Text before the first heading, and files without headings, are found
+/// by plain words in `search_with_intros`, never by filters or `search`.
+#[test]
+fn intros_are_found_by_words_only() {
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        "trip.org",
+        "#+TITLE: Lyon trip\n#+FILETAGS: :travel:\nBook the train early.\n* Packing\npassport\n",
+    );
+    put(dir.path(), "notes/loose.org", "Just a train of thought.\n");
+    put(
+        dir.path(),
+        "plain.org",
+        "#+TITLE: Only keywords\n* Heading\n",
+    );
+    let vault = Vault::open(dir.path(), keywords(), &[]).unwrap();
+    let mut index = NoteIndex::in_memory().unwrap();
+    index.sync(&vault).unwrap();
+    let found = |q: &str| -> Vec<(String, usize, bool)> {
+        index
+            .search_with_intros(&Query::parse(q), &ctx())
+            .unwrap()
+            .into_iter()
+            .map(|n| (n.record.title.clone(), n.record.line, n.record.is_intro()))
+            .collect()
+    };
+    let mut train = found("train");
+    train.sort();
+    assert_eq!(
+        train,
+        [("Lyon trip".into(), 3, true), ("loose".into(), 1, true)]
+    );
+    assert_eq!(found("passport"), [("Packing".into(), 4, false)]);
+    assert_eq!(found("lyon"), [("Lyon trip".into(), 3, true)], "the title");
+    assert_eq!(found("train t.travel"), [("Lyon trip".into(), 3, true)]);
+    assert_eq!(found("train b.loose").len(), 1);
+    assert_eq!(found("train i.todo"), []);
+    assert_eq!(
+        found("t.travel"),
+        [("Packing".into(), 4, false)],
+        "no words"
+    );
+    assert!(titles(&index, "train").is_empty(), "plain search: headings");
+    assert_eq!(index.all().unwrap().len(), 2, "all: headings only");
+}

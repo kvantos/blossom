@@ -67,6 +67,9 @@ fn print_json(value: &impl Serialize) -> Out {
 fn heading_text(n: &Note) -> String {
     let r = &n.record;
     let mut s = String::new();
+    if r.is_intro() {
+        s.push_str("(top of file) ");
+    }
     if let Some(k) = &r.keyword {
         s.push_str(k);
         s.push(' ');

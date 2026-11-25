@@ -1,6 +1,7 @@
-//! The tantivy index: one document per file (path and revision) and one per
-//! heading (its [`NoteRecord`] as JSON, plus its text as lower-cased
-//! trigrams for narrowing). It is a cache: deleting it loses nothing.
+//! The tantivy index: one document per file (path and revision), one per
+//! heading and one per file intro (its [`NoteRecord`] as JSON, plus its
+//! text as lower-cased trigrams for narrowing). It is a cache: deleting it
+//! loses nothing.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -21,11 +22,11 @@ use tantivy::{
 
 use crate::matcher::{self, MatchContext};
 use crate::query::{Condition, Expr, Query};
-use crate::record::{Note, NoteRecord, records};
+use crate::record::{Note, NoteRecord, intro_record, records};
 
 /// Bump when the schema or the record format changes; an index with another
 /// version (or other settings) is deleted and rebuilt.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const META_FILE: &str = "blossom-index.meta";
 const GRAMS: &str = "grams3";
 const WRITER_MEMORY: usize = 50_000_000;
@@ -200,7 +201,8 @@ impl NoteIndex {
                     continue;
                 }
             };
-            let recs = records(&file.path, &doc, vault.keywords(), rev.mtime_ns);
+            let mut recs = records(&file.path, &doc, vault.keywords(), rev.mtime_ns);
+            recs.extend(intro_record(&file.path, &doc, rev.mtime_ns));
             let w = self.writer(&mut writer)?;
             self.put_file(w, &file.path, rev, &recs)?;
             if was.is_some() {
@@ -228,7 +230,8 @@ impl NoteIndex {
         Ok(report)
     }
 
-    /// Indexes one file's records now (e.g. right after Blossom wrote it).
+    /// Indexes one file's records now (e.g. right after Blossom wrote it);
+    /// an intro record among them is kept apart from the headings.
     ///
     /// # Errors
     ///
@@ -289,8 +292,9 @@ impl NoteIndex {
         for r in recs {
             let json = serde_json::to_string(r).map_err(|e| IndexError::Corrupt(e.to_string()))?;
             let grams = format!("{}\n{}", r.text, r.tags.join(" ")).to_lowercase();
+            let kind = if r.is_intro() { "intro" } else { "note" };
             w.add_document(
-                doc!(f.kind => "note", f.path => path, f.record => json, f.grams => grams),
+                doc!(f.kind => kind, f.path => path, f.record => json, f.grams => grams),
             )?;
         }
         Ok(())
@@ -302,7 +306,7 @@ impl NoteIndex {
     ///
     /// On tantivy errors or undecodable records.
     pub fn all(&self) -> Result<Vec<Note>, IndexError> {
-        self.notes(&self.note_query(None))
+        self.notes(&self.note_query("note", None))
     }
 
     /// Runs `query`: the index narrows to candidates when the query has a
@@ -313,16 +317,39 @@ impl NoteIndex {
     ///
     /// On tantivy errors or undecodable records.
     pub fn search(&self, query: &Query, ctx: &MatchContext) -> Result<Vec<Note>, IndexError> {
-        let candidates = self.notes(&self.note_query(narrowing_term(query).as_deref()))?;
+        let term = narrowing_term(query);
+        let candidates = self.notes(&self.note_query("note", term.as_deref()))?;
         Ok(filter_and_sort(candidates, query, ctx))
     }
 
-    /// `kind:note`, plus every trigram of `term` when given.
-    fn note_query(&self, term: Option<&str>) -> BooleanQuery {
+    /// Like [`NoteIndex::search`], but when the query has a plain-text term
+    /// file intros match too (level-0 records, [`NoteRecord::is_intro`]),
+    /// ranked with the headings. For search screens; the agenda and
+    /// filters see headings only.
+    ///
+    /// # Errors
+    ///
+    /// On tantivy errors or undecodable records.
+    pub fn search_with_intros(
+        &self,
+        query: &Query,
+        ctx: &MatchContext,
+    ) -> Result<Vec<Note>, IndexError> {
+        let term = narrowing_term(query);
+        let mut candidates = self.notes(&self.note_query("note", term.as_deref()))?;
+        if query.text_terms().is_empty() {
+            return Ok(filter_and_sort(candidates, query, ctx));
+        }
+        candidates.extend(self.notes(&self.note_query("intro", term.as_deref()))?);
+        Ok(filter_and_sort(candidates, query, ctx))
+    }
+
+    /// `kind:<kind>`, plus every trigram of `term` when given.
+    fn note_query(&self, kind: &str, term: Option<&str>) -> BooleanQuery {
         let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = vec![(
             Occur::Must,
             Box::new(TermQuery::new(
-                TantivyTerm::from_field_text(self.fields.kind, "note"),
+                TantivyTerm::from_field_text(self.fields.kind, kind),
                 IndexRecordOption::Basic,
             )),
         )];

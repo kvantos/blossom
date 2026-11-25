@@ -1,7 +1,9 @@
 //! The search screen: a query field (plain words, or Orgzly filters such as
 //! `i.todo t.work`), then the matching headings grouped by file, in the
-//! index's rank order. A heading found by its body shows the line that
-//! matched. Clicking a heading opens it.
+//! index's rank order. Plain words also find a file's intro (the text
+//! before its first heading, or all of a file without headings), shown
+//! first in its file's group. A result found by its body shows the line
+//! that matched. Clicking one opens it.
 
 use blossom_index::{Note, Query};
 use iced::widget::{Column, button, column, row, scrollable, text, text_input};
@@ -29,7 +31,7 @@ const EXAMPLES: [(&str, &str); 5] = [
 /// The whole search pane. `results` are for `input` (stale ones are
 /// dropped before they get here); `None` while waiting for the first.
 pub fn view<'a>(input: &'a str, results: Option<&'a SearchResults>) -> Element<'a, Message> {
-    let field = text_input("Search headings and text…", input)
+    let field = text_input("Search your notes…", input)
         .id(INPUT)
         .on_input(Message::SearchInput)
         .size(15)
@@ -78,7 +80,7 @@ fn results_view<'a>(r: &'a SearchResults, parts: &mut Vec<Element<'a, Message>>)
             0 => "Nothing found".into(),
             n => format!(
                 "{n} {} in {files} {}",
-                if n == 1 { "heading" } else { "headings" },
+                if n == 1 { "result" } else { "results" },
                 if files == 1 { "file" } else { "files" }
             ),
         })
@@ -111,12 +113,14 @@ fn results_view<'a>(r: &'a SearchResults, parts: &mut Vec<Element<'a, Message>>)
     }
 }
 
-/// Notes grouped by file, files in order of their best-ranked note.
+/// Notes grouped by file, files in order of their best-ranked note, a
+/// file's intro first in its group.
 fn group(notes: &[Note]) -> Vec<(&str, Vec<&Note>)> {
     let mut out: Vec<(&str, Vec<&Note>)> = Vec::new();
     for n in notes {
         let path = n.record.path.as_str();
         match out.iter_mut().find(|(p, _)| *p == path) {
+            Some((_, v)) if n.record.is_intro() => v.insert(0, n),
             Some((_, v)) => v.push(n),
             None => out.push((path, vec![n])),
         }
@@ -127,6 +131,9 @@ fn group(notes: &[Note]) -> Vec<(&str, Vec<&Note>)> {
 fn note_row<'a>(n: &'a Note, terms: &[String]) -> Element<'a, Message> {
     let r = &n.record;
     let mut title = row![].spacing(6).align_y(iced::Center);
+    if r.is_intro() {
+        title = title.push(text("Top of file").size(12).style(dim));
+    }
     if let Some(k) = &r.keyword {
         title = title.push(chip(
             k.clone(),
@@ -145,7 +152,11 @@ fn note_row<'a>(n: &'a Note, terms: &[String]) -> Element<'a, Message> {
         body = body.push(text(line).size(12).style(dim));
     }
     button(body)
-        .on_press(Message::OpenHeading(r.path.clone(), r.heading))
+        .on_press(if r.is_intro() {
+            Message::OpenIntro(r.path.clone())
+        } else {
+            Message::OpenHeading(r.path.clone(), r.heading)
+        })
         .padding([3, 6])
         .width(Fill)
         .style(style::row(false))
@@ -181,6 +192,43 @@ fn snippet(text: &str, terms: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intros_lead_their_file_group() {
+        let note = |path: &str, level: usize, title: &str| {
+            Note::from(blossom_index::NoteRecord {
+                path: path.into(),
+                heading: 0,
+                line: 1,
+                level,
+                title: title.into(),
+                keyword: None,
+                done: false,
+                priority: None,
+                tags: Vec::new(),
+                inherited_tags: Vec::new(),
+                scheduled: None,
+                deadline: None,
+                closed: None,
+                created: None,
+                events: Vec::new(),
+                id: None,
+                custom_id: None,
+                modified: 0,
+                text: String::new(),
+            })
+        };
+        let notes = [
+            note("a.org", 1, "A1"),
+            note("b.org", 0, "B"),
+            note("a.org", 0, "A"),
+        ];
+        let titles: Vec<(&str, Vec<&str>)> = group(&notes)
+            .into_iter()
+            .map(|(p, v)| (p, v.iter().map(|n| n.record.title.as_str()).collect()))
+            .collect();
+        assert_eq!(titles, [("a.org", vec!["A", "A1"]), ("b.org", vec!["B"])]);
+    }
 
     #[test]
     fn snippets_show_the_matching_body_line() {

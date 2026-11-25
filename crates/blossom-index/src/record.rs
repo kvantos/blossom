@@ -13,7 +13,7 @@ pub struct NoteRecord {
     pub heading: usize,
     /// 1-based line of the heading.
     pub line: usize,
-    /// Number of stars.
+    /// Number of stars; 0 for a file intro (see [`intro_record`]).
     pub level: usize,
     /// Title as written.
     pub title: String,
@@ -83,6 +83,56 @@ pub fn records(path: &str, doc: &Document, keywords: &Keywords, modified: u64) -
             }
         })
         .collect()
+}
+
+impl NoteRecord {
+    /// Whether this is a file's intro rather than a heading.
+    #[must_use]
+    pub fn is_intro(&self) -> bool {
+        self.level == 0
+    }
+}
+
+/// The file's intro (real text before the first heading, or the whole of a
+/// file without headings) as a level-0 record, so plain-text search finds
+/// it. Its title is `#+TITLE`, else the file name; its tags are the file
+/// tags. `None` when there is no such text.
+#[must_use]
+pub fn intro_record(path: &str, doc: &Document, modified: u64) -> Option<NoteRecord> {
+    let pre = doc.preamble();
+    let range = pre.intro.clone()?;
+    let text = doc.text();
+    let title = pre
+        .keywords
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("TITLE"))
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            name.strip_suffix(".org").unwrap_or(name).to_string()
+        });
+    Some(NoteRecord {
+        path: path.to_string(),
+        heading: 0,
+        line: 1 + text[..range.start].matches('\n').count(),
+        level: 0,
+        text: format!("{title}\n{}", &text[range]),
+        title,
+        keyword: None,
+        done: false,
+        priority: None,
+        tags: pre.file_tags.clone(),
+        inherited_tags: pre.file_tags.clone(),
+        scheduled: None,
+        deadline: None,
+        closed: None,
+        created: None,
+        events: Vec::new(),
+        id: pre.file_id().map(String::from),
+        custom_id: None,
+        modified,
+    })
 }
 
 /// A record with its timestamps parsed, as the matcher uses it.

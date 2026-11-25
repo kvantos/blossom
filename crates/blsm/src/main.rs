@@ -44,7 +44,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Search headings (Orgzly query syntax, e.g. `i.todo s.today t.work`).
+    /// Search headings, and for plain words also the text before a file's
+    /// first heading (Orgzly query syntax, e.g. `i.todo s.today t.work`).
     Search {
         /// The query; several words are joined with spaces.
         query: Vec<String>,
@@ -211,7 +212,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     match cli.command {
         Command::Search { query } => {
             let q = Query::parse(&query.join(" "));
-            let hits = s.index.search(&q, &s.ctx)?;
+            let hits = s.index.search_with_intros(&q, &s.ctx)?;
             if let Some(days) = q.agenda_days {
                 output::agenda(
                     &blossom_index::matcher::agenda(&hits, s.ctx.now.date(), days),

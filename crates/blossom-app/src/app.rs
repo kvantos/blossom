@@ -96,8 +96,8 @@ pub struct App {
     search_input: String,
     /// Results for `search_input`, once they arrive.
     search: Option<Arc<SearchResults>>,
-    /// A heading to select once its file has loaded.
-    pending_heading: Option<(String, usize)>,
+    /// What to select once its file has loaded: a heading or the intro.
+    pending_heading: Option<(String, Selected)>,
     /// The last operation's message, and its changes while it can be undone.
     notice: Option<(String, Option<Vec<Change>>)>,
     /// The capture panel, while open.
@@ -199,8 +199,10 @@ pub enum Message {
     ShowSearch,
     /// The search field changed.
     SearchInput(String),
-    /// Open a file at a heading (from the agenda).
+    /// Open a file at a heading (from the agenda or search).
     OpenHeading(String, usize),
+    /// Open a file at its intro, the text before the first heading (from search).
+    OpenIntro(String),
     /// Run a file operation in the worker.
     Run(Op),
     /// Undo the last operation.
@@ -489,7 +491,8 @@ impl App {
                 self.search_input = s;
                 self.send_search();
             }
-            Message::OpenHeading(path, index) => self.open_heading(path, index),
+            Message::OpenHeading(path, index) => self.open_at(path, Selected::Heading(index)),
+            Message::OpenIntro(path) => self.open_at(path, Selected::Intro),
             Message::Run(op) => self.run(op),
             Message::UndoOp => {
                 if let Some((_, Some(changes))) = self.notice.take()
@@ -721,18 +724,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|f| f.path == path && f.doc.is_none());
                 self.on_disk(path.clone(), Some((doc, rev)));
-                if let Some((p, i)) = self.pending_heading.take() {
-                    if p == path
-                        && let Some(f) = self.file.as_mut().filter(|f| f.path == path)
-                        && f.doc.as_ref().is_some_and(|d| i < d.headings().len())
-                    {
-                        f.selected = Selected::Heading(i);
-                        f.refresh_blocks();
-                        f.fill_inputs();
-                    } else if p != path {
-                        self.pending_heading = Some((p, i));
-                    }
-                }
+                self.select_pending(&path);
                 if was_loading
                     && self.view == View::Files
                     && let Some(plan) = self.shot.clone()
@@ -923,19 +915,38 @@ impl App {
         }
     }
 
-    fn open_heading(&mut self, path: String, index: usize) {
+    /// Selects what [`App::open_at`] asked for, once `path` has loaded.
+    fn select_pending(&mut self, path: &str) {
+        let Some((p, sel)) = self.pending_heading.take() else {
+            return;
+        };
+        if p != path {
+            self.pending_heading = Some((p, sel));
+        } else if let Some(f) = self.file.as_mut().filter(|f| f.path == path)
+            && f.doc.as_ref().is_some_and(|d| match sel {
+                Selected::Heading(i) => i < d.headings().len(),
+                _ => true,
+            })
+        {
+            f.selected = sel;
+            f.refresh_blocks();
+            f.fill_inputs();
+        }
+    }
+
+    fn open_at(&mut self, path: String, sel: Selected) {
         self.view = View::Files;
         if let Some(f) = &mut self.file
             && f.path == path
             && f.doc.is_some()
         {
             f.editor = None;
-            f.selected = Selected::Heading(index);
+            f.selected = sel;
             f.refresh_blocks();
             f.fill_inputs();
             return;
         }
-        self.pending_heading = Some((path.clone(), index));
+        self.pending_heading = Some((path.clone(), sel));
         self.select_file(path);
     }
 
@@ -2546,6 +2557,17 @@ mod tests {
         // In the open file: selected at once.
         let _ = a.update(Message::OpenHeading("b.org".into(), 0));
         assert_eq!(a.file.as_ref().unwrap().selected, Selected::Heading(0));
+        // A search hit on the text before the first heading.
+        let _ = a.update(Message::OpenIntro("b.org".into()));
+        assert_eq!(a.file.as_ref().unwrap().selected, Selected::Intro);
+        let _ = a.update(Message::OpenIntro("c.org".into()));
+        let _ = a.update(Message::Worker(Event::Document(
+            "c.org".into(),
+            doc("* x\n"),
+            rev(3),
+        )));
+        assert_eq!(a.file.as_ref().unwrap().selected, Selected::Intro);
+        let _ = a.update(Message::OpenHeading("b.org".into(), 0));
         let out = blossom_vault::ops::Outcome {
             changes: vec![Change {
                 path: "b.org".into(),
