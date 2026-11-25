@@ -179,6 +179,18 @@ Notes from Phase 7:
 - App "By meaning" (`meaning.rs`, `search.rs`): a toggler beside the search field. `Request::Search { query, meaning }`; by meaning, the worker splits the query (`split_text`), takes the filter's headings as candidates and hands them with the words to the meaning thread (`Meaning::start`, on first use; its events come back through the worker's inbox as `Input::Meaning(generation, event)`, so a closed vault's are dropped). The thread gets every heading (`In::Notes`) at start and after every change; it loads the embedder on the first ask, or reports `Status::NeedsDownload` (built-in model missing) and waits for `In::Download` (Cancel sets a flag the progress callback checks; a stopped download goes back to `NeedsDownload`). It embeds 16 headings per call, checking messages between batches so queries and new notes are seen quickly; reports `Embedding { done, total }` (throttled to 150 ms), answers the current query again every 3 s while embedding and when done (`Ready`); saves every 15 s, when done, on `In::Save` (sent by `Request::Flush`, so closing the app keeps the work; the worker waits up to 5 s) and when it stops. Failures (`Status::Failed`) block until "Try again" (`In::Retry`). Results: one list, closest first, at most 50, each with its file and first body line; filter-only queries ask for words; empty results while reading say nothing (the progress bar is the message). Switching back to words leaves the thread embedding in the background. `OpenVault` gained `semantic` and `data_dir` (tests use a mock server and temp folders). Screenshot hook: `BLOSSOM_SCREENSHOT_MEANING=1` with `BLOSSOM_SCREENSHOT_SEARCH`; the hook now exits through the normal close. `Model::display_name`/`download_mb` (rounded: 134 and 488 MB) for messages. App feature `builtin-model` (default).
 - `[semantic]` (`SemanticConfig` in `blossom_vault::config`): `model = "english"` (default) | `"multilingual"` | `"server"`; `server` (default `http://localhost:11434/v1`, Ollama), `server_model` (default `nomic-embed-text`), `api_key_env` (name of the variable holding the key; unset variable is an error). `Backend::from_config` reads it; `open_embedder(backend, data_dir)` gives a `Box<dyn Embedder + Send + Sync>`, or `NotDownloaded(model)`, or (without the feature) an error pointing to `model = "server"`.
 
+## Phase 8: themes
+Agreed with the user 2026-11-25: more than the pink, for other tastes.
+- [x] Colours Blossom (pink, default), Solarized, Gray, each light and dark; mode Follow system (default), Light, Dark (`style::Colours`, `style::ModeChoice`, `style::theme(colours, mode)`).
+- [x] The app remembers the choice in `settings.toml` in the data folder (`settings.rs`); config.toml stays hand-edited, the app never writes it.
+- [x] "Appearance…" panel (sidebar footer and welcome screen), radio buttons, applies at once, Esc closes.
+- [x] Screenshot hook: `BLOSSOM_THEME` takes `light|dark` or `solarized-`/`gray-` + `light|dark`; `BLOSSOM_SCREENSHOT_APPEARANCE=1` opens the panel.
+
+Notes from Phase 8:
+- Solarized uses its canonical colours with blue as the accent; body text is base01 in light and base1 in dark (base00/base0 are too faint for long reading). Gray is neutral greys with a slate-blue accent.
+- A test checks every theme's text contrast is at least 4.5:1.
+- `settings.toml` (`colours = "gray"`, `mode = "dark"`); a missing or broken file gives the defaults (a broken one is reported on stderr). Written via temp file + rename.
+
 ## Later
 Order agreed with the user on 2026-11-24: dependency upgrade, then Linux packages, then semantic search (planned first).
 - [x] `blsm` name-clash check: the user found no `blsm` binary or package on crates.io, AUR, Debian or Homebrew (2026-11-24).

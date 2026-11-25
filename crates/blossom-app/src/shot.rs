@@ -3,8 +3,10 @@
 //! `BLOSSOM_SCREENSHOT_HEADING` if given (opening its editor when
 //! `BLOSSOM_SCREENSHOT_EDIT` is set) or shows the search screen for
 //! `BLOSSOM_SCREENSHOT_SEARCH` (a query, may be empty; by meaning with
-//! `BLOSSOM_SCREENSHOT_MEANING`), saves a screenshot of the window as
-//! PNG and exits. `BLOSSOM_THEME=dark|light` overrides the system mode. Used
+//! `BLOSSOM_SCREENSHOT_MEANING`), opens the Appearance panel with
+//! `BLOSSOM_SCREENSHOT_APPEARANCE`, saves a screenshot of the window as
+//! PNG and exits. `BLOSSOM_THEME` (`light`, `dark`, or
+//! `solarized-`/`gray-` + `light`/`dark`) overrides the saved theme. Used
 //! to check the UI without a screenshot tool; not part of normal use.
 
 use std::io::{self, Write};
@@ -22,6 +24,8 @@ pub struct Plan {
     pub heading: Option<usize>,
     /// A forced light/dark mode.
     pub mode: Option<iced::theme::Mode>,
+    /// Forced colours (with `mode`).
+    pub colours: Option<crate::style::Colours>,
     /// Open the section editor before capturing.
     pub edit: bool,
     /// Show the agenda instead of a file.
@@ -32,8 +36,28 @@ pub struct Plan {
     pub meaning: bool,
     /// Open the capture panel before capturing.
     pub capture: bool,
+    /// Open the Appearance panel before capturing.
+    pub appearance: bool,
     /// Open this diagram (a link path in the file) before capturing.
     pub diagram: Option<String>,
+}
+
+/// `BLOSSOM_THEME`'s value: `light`, `dark`, `solarized-dark`, `gray-light`…
+fn parse_theme(value: &str) -> Option<(crate::style::Colours, iced::theme::Mode)> {
+    use crate::style::Colours;
+    let (colours, mode) = match value.rsplit_once('-') {
+        Some(("solarized", m)) => (Colours::Solarized, m),
+        Some(("gray", m)) => (Colours::Gray, m),
+        Some(("blossom", m)) => (Colours::Blossom, m),
+        None => (Colours::Blossom, value),
+        Some(_) => return None,
+    };
+    let mode = match mode {
+        "light" => iced::theme::Mode::Light,
+        "dark" => iced::theme::Mode::Dark,
+        _ => return None,
+    };
+    Some((colours, mode))
 }
 
 impl Plan {
@@ -41,22 +65,23 @@ impl Plan {
     #[must_use]
     pub fn from_env() -> Option<Plan> {
         let out = std::env::var_os("BLOSSOM_SCREENSHOT")?;
+        let theme = std::env::var("BLOSSOM_THEME")
+            .ok()
+            .and_then(|t| parse_theme(&t));
         Some(Plan {
             out: PathBuf::from(out),
             file: std::env::var("BLOSSOM_SCREENSHOT_FILE").ok(),
             heading: std::env::var("BLOSSOM_SCREENSHOT_HEADING")
                 .ok()
                 .and_then(|h| h.parse().ok()),
-            mode: match std::env::var("BLOSSOM_THEME").ok().as_deref() {
-                Some("dark") => Some(iced::theme::Mode::Dark),
-                Some("light") => Some(iced::theme::Mode::Light),
-                _ => None,
-            },
+            mode: theme.map(|t| t.1),
+            colours: theme.map(|t| t.0),
             edit: std::env::var_os("BLOSSOM_SCREENSHOT_EDIT").is_some(),
             agenda: std::env::var_os("BLOSSOM_SCREENSHOT_AGENDA").is_some(),
             search: std::env::var("BLOSSOM_SCREENSHOT_SEARCH").ok(),
             meaning: std::env::var_os("BLOSSOM_SCREENSHOT_MEANING").is_some(),
             capture: std::env::var_os("BLOSSOM_SCREENSHOT_CAPTURE").is_some(),
+            appearance: std::env::var_os("BLOSSOM_SCREENSHOT_APPEARANCE").is_some(),
             diagram: std::env::var("BLOSSOM_SCREENSHOT_DIAGRAM").ok(),
         })
     }
@@ -143,6 +168,23 @@ fn adler32(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_names() {
+        use crate::style::Colours;
+        use iced::theme::Mode;
+        assert_eq!(parse_theme("dark"), Some((Colours::Blossom, Mode::Dark)));
+        assert_eq!(
+            parse_theme("gray-light"),
+            Some((Colours::Gray, Mode::Light))
+        );
+        assert_eq!(
+            parse_theme("solarized-dark"),
+            Some((Colours::Solarized, Mode::Dark))
+        );
+        assert_eq!(parse_theme("pink-dark"), None);
+        assert_eq!(parse_theme("gray"), None);
+    }
 
     #[test]
     fn checksums() {

@@ -15,6 +15,7 @@ mod outline;
 mod panels;
 mod read;
 mod search;
+mod settings;
 mod shot;
 mod style;
 mod tree;
@@ -75,8 +76,26 @@ fn main() -> iced::Result {
     });
     let today = chrono::Local::now().date_naive();
     let shot = shot::Plan::from_env();
+    let settings_path = settings::default_path();
+    let saved = match settings_path.as_deref().map(settings::Settings::load) {
+        Some((s, err)) => {
+            if let Some(e) = err {
+                eprintln!("blossom: {e}");
+            }
+            s
+        }
+        None => settings::Settings::default(),
+    };
     iced::application(
-        move || App::new(open.clone(), template.clone(), today, shot.clone()),
+        move || {
+            App::new(
+                open.clone(),
+                template.clone(),
+                today,
+                shot.clone(),
+                (saved, settings_path.clone()),
+            )
+        },
         App::update,
         App::view,
     )

@@ -50,8 +50,10 @@ use crate::outline;
 use crate::panels::{self, CapturePanel, RefilePicker};
 use crate::read::{self, Actions, Ink, Picture};
 use crate::search;
+use crate::settings::Settings;
 use crate::shot;
 use crate::style::{self, Chip};
+use crate::style::{Colours, ModeChoice};
 use crate::tree::{self, FileInfo};
 use crate::worker::{self, Event, Handle, Op, OpenVault, Request, SearchResults};
 
@@ -67,7 +69,14 @@ const DEFAULT_FOLDER: &str = "~/Notes";
 /// The app.
 #[allow(clippy::struct_excessive_bools)] // independent switches
 pub struct App {
-    mode: Mode,
+    /// The system's light/dark mode; `Mode::None` until known.
+    system: Mode,
+    /// The remembered theme choice.
+    settings: Settings,
+    /// Where `settings` is saved; `None` in tests.
+    settings_path: Option<PathBuf>,
+    /// The Appearance panel is open.
+    appearance: bool,
     worker: Option<Handle>,
     /// A vault to open as soon as the worker is ready.
     pending: Option<OpenVault>,
@@ -225,6 +234,14 @@ pub enum Message {
     DismissNotice,
     /// Open the capture panel.
     OpenCapture,
+    /// Open the Appearance panel.
+    OpenAppearance,
+    /// Close it.
+    CloseAppearance,
+    /// Appearance: which colours.
+    SetColours(Colours),
+    /// Appearance: light, dark or follow the system.
+    SetMode(ModeChoice),
     /// Capture: choose a template, by its label.
     CaptureTemplate(String),
     /// Capture: answer prompt N.
@@ -281,6 +298,7 @@ impl App {
         template: OpenVault,
         today: NaiveDate,
         shot: Option<shot::Plan>,
+        (settings, settings_path): (Settings, Option<PathBuf>),
     ) -> (App, Task<Message>) {
         let forced = shot.as_ref().and_then(|p| p.mode);
         let search_input = shot
@@ -289,7 +307,10 @@ impl App {
             .unwrap_or_default();
         let search_meaning = shot.as_ref().is_some_and(|p| p.meaning);
         let app = App {
-            mode: forced.unwrap_or(Mode::None),
+            system: Mode::None,
+            settings,
+            settings_path,
+            appearance: false,
             worker: None,
             vault_exists: open.is_some() || typed_folder_exists(DEFAULT_FOLDER),
             vault_input: open
@@ -346,9 +367,54 @@ impl App {
         }
     }
 
-    /// Our light or dark theme; `None` until the system mode is known.
+    /// The chosen theme; `None` while following a system mode not yet known.
     pub fn theme(&self) -> Option<Theme> {
-        (self.mode != Mode::None).then(|| style::theme(self.mode))
+        let mode = self.mode();
+        (mode != Mode::None).then(|| style::theme(self.colours(), mode))
+    }
+
+    /// The light/dark mode in use: the screenshot hook's, the chosen one, or
+    /// the system's.
+    fn mode(&self) -> Mode {
+        self.shot
+            .as_ref()
+            .and_then(|p| p.mode)
+            .unwrap_or_else(|| self.settings.mode.resolve(self.system))
+    }
+
+    /// The colours in use: the screenshot hook's or the chosen ones.
+    fn colours(&self) -> Colours {
+        self.shot
+            .as_ref()
+            .and_then(|p| p.colours)
+            .unwrap_or(self.settings.colours)
+    }
+
+    /// The Appearance panel's messages.
+    fn on_appearance(&mut self, message: &Message) {
+        match message {
+            Message::OpenAppearance => self.appearance = true,
+            Message::CloseAppearance => self.appearance = false,
+            Message::SetColours(colours) => self.set_settings(Settings {
+                colours: *colours,
+                ..self.settings
+            }),
+            Message::SetMode(mode) => self.set_settings(Settings {
+                mode: *mode,
+                ..self.settings
+            }),
+            _ => {}
+        }
+    }
+
+    /// Uses and remembers new Appearance choices.
+    fn set_settings(&mut self, settings: Settings) {
+        self.settings = settings;
+        if let Some(path) = &self.settings_path
+            && let Err(e) = self.settings.save(path)
+        {
+            self.status = Some(format!("Couldn't save the theme: {e}"));
+        }
     }
 
     /// The worker, system theme changes, keys and close requests.
@@ -393,11 +459,11 @@ impl App {
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Worker(event) => return self.on_worker(event),
-            Message::Mode(mode) => {
-                if self.shot.as_ref().is_none_or(|p| p.mode.is_none()) {
-                    self.mode = mode;
-                }
-            }
+            Message::Mode(mode) => self.system = mode,
+            m @ (Message::OpenAppearance
+            | Message::CloseAppearance
+            | Message::SetColours(_)
+            | Message::SetMode(_)) => self.on_appearance(&m),
             Message::VaultInput(s) => {
                 self.vault_input = s;
                 self.vault_exists = typed_folder_exists(&self.vault_input);
@@ -1457,6 +1523,9 @@ impl App {
             return Task::none();
         }
         if matches!(key, Key::Named(keyboard::key::Named::Escape)) {
+            if std::mem::take(&mut self.appearance) {
+                return Task::none();
+            }
             if self.refile.take().is_some() {
                 return Task::none();
             }
@@ -1525,6 +1594,7 @@ impl App {
             self.image_action(path.clone());
             return Task::none();
         }
+        self.appearance = plan.appearance;
         let focus = if plan.capture {
             self.open_capture()
         } else if plan.edit {
@@ -1573,6 +1643,9 @@ impl App {
     /// main area rather than floating over it: iced's layered `stack` drops
     /// a text editor's text.
     fn panel(&self) -> Option<Element<'_, Message>> {
+        if self.appearance {
+            return Some(panels::appearance_view(&self.settings));
+        }
         if let Some(r) = &self.refile {
             return Some(panels::refile_view(r));
         }
@@ -1586,7 +1659,11 @@ impl App {
     }
 
     fn body(&self) -> Element<'_, Message> {
-        let main: Element<'_, Message> = if self.root.is_none() {
+        let main: Element<'_, Message> = if self.root.is_none() && self.appearance {
+            container(panels::appearance_view(&self.settings))
+                .center(Fill)
+                .into()
+        } else if self.root.is_none() {
             self.welcome()
         } else if let Some(d) = &self.diagram {
             self.beside_sidebar(container(draw::view(d)).width(Fill).height(Fill))
@@ -1697,6 +1774,10 @@ impl App {
                 text("Tip: set `vault` in ~/.config/blossom/config.toml to open it on start.")
                     .size(12)
                     .style(dim),
+                button(text("Appearance…").size(12))
+                    .on_press(Message::OpenAppearance)
+                    .padding([2, 0])
+                    .style(button::text),
             ]
             .spacing(14),
         )
@@ -1807,6 +1888,11 @@ impl App {
             .padding([0, 6]),
             rule::horizontal(1),
             scrollable(Column::with_children(rows).spacing(1).padding([6, 6])).height(Fill),
+            rule::horizontal(1),
+            button(text("Appearance…").size(12))
+                .on_press(Message::OpenAppearance)
+                .padding([6, 12])
+                .style(button::text),
         ]
         .into()
     }
@@ -2155,7 +2241,7 @@ impl App {
     }
 
     fn ink(&self) -> Ink {
-        Ink::of(&style::theme(self.mode))
+        Ink::of(&style::theme(self.colours(), self.mode()))
     }
 }
 
@@ -2507,8 +2593,49 @@ mod tests {
             template,
             NaiveDate::from_ymd_opt(2026, 11, 23).unwrap(),
             None,
+            (Settings::default(), None),
         )
         .0
+    }
+
+    #[test]
+    fn theme_follows_the_system_unless_chosen() {
+        let mut a = app();
+        assert!(a.theme().is_none(), "system mode not known yet");
+        let _ = a.update(Message::Mode(Mode::Dark));
+        assert_eq!(a.mode(), Mode::Dark);
+        let _ = a.update(Message::SetMode(ModeChoice::Light));
+        let _ = a.update(Message::Mode(Mode::Dark));
+        assert_eq!(a.mode(), Mode::Light);
+        let _ = a.update(Message::SetColours(Colours::Gray));
+        assert_eq!(a.theme().map(|t| t.to_string()), Some("Gray Light".into()));
+        let _ = a.update(Message::SetMode(ModeChoice::System));
+        assert_eq!(a.mode(), Mode::Dark);
+    }
+
+    #[test]
+    fn appearance_choices_are_saved_and_escape_closes_the_panel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let mut a = app();
+        a.settings_path = Some(path.clone());
+        let _ = a.update(Message::OpenAppearance);
+        assert!(a.appearance);
+        let _ = a.update(Message::SetColours(Colours::Solarized));
+        let _ = a.update(Message::SetMode(ModeChoice::Dark));
+        assert_eq!(Settings::load(&path).0, a.settings);
+        let _ = a.update(Message::Key(keyboard::Event::KeyPressed {
+            key: Key::Named(keyboard::key::Named::Escape),
+            modified_key: Key::Named(keyboard::key::Named::Escape),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        }));
+        assert!(!a.appearance);
     }
 
     fn doc(s: &str) -> Arc<Document> {

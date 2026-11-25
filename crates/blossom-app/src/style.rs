@@ -1,4 +1,5 @@
-//! Blossom's light and dark themes and the small styles built on them.
+//! Blossom's themes (Blossom, Solarized, Gray; each light and dark) and the
+//! small styles built on them.
 
 // Colours are written as 0xRRGGBB, which reads better than digit groups.
 #![allow(clippy::unreadable_literal)]
@@ -6,12 +7,80 @@
 use iced::theme::{Mode, Palette};
 use iced::widget::{button, container};
 use iced::{Background, Border, Color, Theme, color};
+use serde::{Deserialize, Serialize};
 
-/// The theme for the system's light/dark mode.
+/// A set of colours, each with a light and a dark version.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Colours {
+    /// Blossom's own pink.
+    #[default]
+    Blossom,
+    /// Ethan Schoonover's Solarized.
+    Solarized,
+    /// Calm neutral greys with a slate-blue accent.
+    Gray,
+}
+
+impl Colours {
+    /// Every set, in the order the Appearance panel lists them.
+    pub const ALL: [Colours; 3] = [Colours::Blossom, Colours::Solarized, Colours::Gray];
+
+    /// The name shown in the Appearance panel.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Colours::Blossom => "Blossom (pink)",
+            Colours::Solarized => "Solarized",
+            Colours::Gray => "Gray",
+        }
+    }
+}
+
+/// Light, dark, or whatever the system uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModeChoice {
+    /// Follow the system's light/dark setting.
+    #[default]
+    System,
+    /// Always light.
+    Light,
+    /// Always dark.
+    Dark,
+}
+
+impl ModeChoice {
+    /// Every choice, in the order the Appearance panel lists them.
+    pub const ALL: [ModeChoice; 3] = [ModeChoice::System, ModeChoice::Light, ModeChoice::Dark];
+
+    /// The name shown in the Appearance panel.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            ModeChoice::System => "Follow system",
+            ModeChoice::Light => "Light",
+            ModeChoice::Dark => "Dark",
+        }
+    }
+
+    /// The mode to use when the system's is `system`.
+    #[must_use]
+    pub fn resolve(self, system: Mode) -> Mode {
+        match self {
+            ModeChoice::System => system,
+            ModeChoice::Light => Mode::Light,
+            ModeChoice::Dark => Mode::Dark,
+        }
+    }
+}
+
+/// The theme for `colours` in `mode` (`Mode::None` counts as light).
 #[must_use]
-pub fn theme(mode: Mode) -> Theme {
-    match mode {
-        Mode::Dark => Theme::custom(
+pub fn theme(colours: Colours, mode: Mode) -> Theme {
+    let dark = mode == Mode::Dark;
+    let (name, palette) = match (colours, dark) {
+        (Colours::Blossom, true) => (
             "Blossom Dark",
             Palette {
                 background: color!(0x1e1b1d),
@@ -22,7 +91,7 @@ pub fn theme(mode: Mode) -> Theme {
                 danger: color!(0xf08080),
             },
         ),
-        Mode::Light | Mode::None => Theme::custom(
+        (Colours::Blossom, false) => (
             "Blossom Light",
             Palette {
                 background: color!(0xfdfbfc),
@@ -33,7 +102,54 @@ pub fn theme(mode: Mode) -> Theme {
                 danger: color!(0xc0392b),
             },
         ),
-    }
+        // Solarized's own accents. Light text is base01 rather than base00,
+        // which is too faint for long reading (4.1:1).
+        (Colours::Solarized, true) => (
+            "Solarized Dark",
+            Palette {
+                background: color!(0x002b36), // base03
+                text: color!(0x93a1a1),       // base1
+                primary: color!(0x268bd2),    // blue
+                success: color!(0x859900),    // green
+                warning: color!(0xb58900),    // yellow
+                danger: color!(0xdc322f),     // red
+            },
+        ),
+        (Colours::Solarized, false) => (
+            "Solarized Light",
+            Palette {
+                background: color!(0xfdf6e3), // base3
+                text: color!(0x586e75),       // base01
+                primary: color!(0x268bd2),    // blue
+                success: color!(0x859900),    // green
+                warning: color!(0xb58900),    // yellow
+                danger: color!(0xdc322f),     // red
+            },
+        ),
+        (Colours::Gray, true) => (
+            "Gray Dark",
+            Palette {
+                background: color!(0x1f1f1f),
+                text: color!(0xe3e3e3),
+                primary: color!(0x9fb0c4),
+                success: color!(0x8fbf9b),
+                warning: color!(0xd4b36a),
+                danger: color!(0xe08c8c),
+            },
+        ),
+        (Colours::Gray, false) => (
+            "Gray Light",
+            Palette {
+                background: color!(0xf6f6f6),
+                text: color!(0x262626),
+                primary: color!(0x4f5d6e),
+                success: color!(0x3f6f4f),
+                warning: color!(0x86651a),
+                danger: color!(0xa23b3b),
+            },
+        ),
+    };
+    Theme::custom(name, palette)
 }
 
 /// What a chip shows, which decides its colour.
@@ -247,5 +363,50 @@ pub fn picture(theme: &Theme) -> container::Style {
             color: theme.extended_palette().background.weak.color,
         },
         ..container::Style::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG relative luminance.
+    fn luminance(c: Color) -> f32 {
+        let f = |v: f32| {
+            if v <= 0.040_45 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
+    }
+
+    fn contrast(a: Color, b: Color) -> f32 {
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn every_theme_has_readable_text() {
+        for colours in Colours::ALL {
+            for mode in [Mode::Light, Mode::Dark] {
+                let p = theme(colours, mode).palette();
+                let c = contrast(p.text, p.background);
+                assert!(c >= 4.5, "{colours:?} {mode:?}: text contrast {c}");
+                let c = contrast(p.primary, p.background);
+                assert!(c >= 2.0, "{colours:?} {mode:?}: accent contrast {c}");
+                let dark = luminance(p.background) < 0.2;
+                assert_eq!(dark, mode == Mode::Dark, "{colours:?} {mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn mode_choice_resolves() {
+        assert_eq!(ModeChoice::System.resolve(Mode::Dark), Mode::Dark);
+        assert_eq!(ModeChoice::System.resolve(Mode::None), Mode::None);
+        assert_eq!(ModeChoice::Light.resolve(Mode::Dark), Mode::Light);
+        assert_eq!(ModeChoice::Dark.resolve(Mode::Light), Mode::Dark);
     }
 }

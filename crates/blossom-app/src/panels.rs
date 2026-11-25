@@ -16,12 +16,14 @@ use blossom_vault::ops::HeadingRef;
 use chrono::NaiveDateTime;
 use iced::widget::text_editor::{Content, Cursor, Position};
 use iced::widget::{
-    Column, button, column, container, pick_list, row, scrollable, text, text_editor, text_input,
+    Column, button, column, container, pick_list, radio, row, scrollable, text, text_editor,
+    text_input,
 };
 use iced::{Element, Fill, Font};
 
 use crate::app::{Message, bold, dim};
-use crate::style;
+use crate::settings::Settings;
+use crate::style::{self, Colours, ModeChoice};
 use crate::worker::RefileTarget;
 
 /// The capture panel's widget id, for focusing.
@@ -247,6 +249,41 @@ impl RefilePicker {
     }
 }
 
+/// The Appearance panel: colours and light/dark. A choice applies at once.
+pub fn appearance_view(s: &Settings) -> Element<'_, Message> {
+    let colours = Colours::ALL.map(|c| {
+        radio(c.label(), c, Some(s.colours), Message::SetColours)
+            .size(16)
+            .text_size(14)
+            .into()
+    });
+    let modes = ModeChoice::ALL.map(|m| {
+        radio(m.label(), m, Some(s.mode), Message::SetMode)
+            .size(16)
+            .text_size(14)
+            .into()
+    });
+    panel_sized(
+        column![
+            text("Appearance").size(18).font(bold()),
+            text("Colours").size(13).style(dim),
+            Column::from_iter(colours).spacing(8),
+            text("Mode").size(13).style(dim),
+            Column::from_iter(modes).spacing(8),
+            row![
+                text("Esc closes").size(12).style(dim).width(Fill),
+                button(text("Close").size(13))
+                    .on_press(Message::CloseAppearance)
+                    .padding([3, 10]),
+            ]
+            .align_y(iced::Center),
+        ]
+        .spacing(10)
+        .into(),
+        340.0,
+    )
+}
+
 /// The refile picker.
 pub fn refile_view(p: &RefilePicker) -> Element<'_, Message> {
     let list: Element<'_, Message> = match &p.targets {
@@ -306,9 +343,14 @@ pub fn refile_view(p: &RefilePicker) -> Element<'_, Message> {
 }
 
 fn panel(content: Element<'_, Message>) -> Element<'_, Message> {
+    panel_sized(content, 620.0)
+}
+
+/// A raised panel `width` wide.
+fn panel_sized(content: Element<'_, Message>, width: f32) -> Element<'_, Message> {
     container(content)
         .padding(18)
-        .width(620)
+        .width(width)
         .style(style::modal)
         .into()
 }
