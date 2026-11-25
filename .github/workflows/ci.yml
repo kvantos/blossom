@@ -36,10 +36,12 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
-  # A short run of every fuzz target (fuzz/, `make fuzz-all`), on stable
-  # Rust. The corpus is cached, so each run carries on from the last one.
+  # A short run of every fuzz target (fuzz/, `make fuzz-all`) on stable
+  # Rust, then the minimal corpus replayed under Valgrind for memory errors
+  # a panic can't show. Only the minimal corpus is cached (it grows with
+  # coverage, not with time), so each run carries on from the last one.
   fuzz:
-    name: fuzz (60 s per target)
+    name: fuzz (60 s per target, then Valgrind)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,14 +49,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind libc6-dbg
       - name: Restore the corpus
         uses: actions/cache@v4
         with:
-          path: fuzz/corpus
-          key: fuzz-corpus-${{ github.run_id }}
-          restore-keys: fuzz-corpus-
+          path: fuzz/corpus/min
+          key: fuzz-corpus-min-${{ github.run_id }}
+          restore-keys: fuzz-corpus-min-
       - name: Fuzz
         run: make fuzz-all SECS=60
+      - name: Replay under Valgrind
+        run: make fuzz-valgrind
       # Replay one locally with `make fuzz-repro FUZZ=<target> CRASH=<file>`.
       - name: Keep failing inputs
         if: failure()

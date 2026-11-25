@@ -49,7 +49,7 @@ INSTALL     ?= install
 BINS        := blossom blsm
 
 .PHONY: all build check install uninstall dist deb appimage macos-app dmg icons clean help \
-        fuzz-build fuzz fuzz-all fuzz-repro
+        fuzz-build fuzz fuzz-all fuzz-repro fuzz-merge fuzz-valgrind
 
 all: build
 
@@ -67,6 +67,8 @@ help:
 	@echo "  make fuzz           fuzz one target (FUZZ=$(FUZZ), SECS=$(SECS)); stable Rust"
 	@echo "  make fuzz-all       fuzz every target ($(FUZZ_TARGETS)) for SECS each"
 	@echo "  make fuzz-repro     replay a crash: FUZZ=splice CRASH=fuzz/artifacts/splice/crash-..."
+	@echo "  make fuzz-merge     add new coverage to the minimal corpus, fuzz/corpus/min/"
+	@echo "  make fuzz-valgrind  replay the minimal corpus under Valgrind (memory errors)"
 	@echo "Variables: PREFIX DESTDIR TARGET CARGO_FLAGS APPIMAGETOOL FUZZ SECS"
 
 build:
@@ -107,16 +109,49 @@ fuzz-build:
 	  $(CARGO) build --release $(CARGO_FLAGS) --manifest-path fuzz/Cargo.toml \
 	  --target $(FUZZ_TRIPLE) --bins
 
-# The corpus grows in fuzz/corpus/FUZZ (seeded from the test fixtures);
-# a failing input is saved in fuzz/artifacts/FUZZ/.
+# The corpus grows in fuzz/corpus/FUZZ, seeded from the test fixtures and
+# the minimal corpus (below); a failing input is saved in fuzz/artifacts/FUZZ/.
 fuzz: fuzz-build
-	mkdir -p fuzz/corpus/$(FUZZ) fuzz/artifacts/$(FUZZ)
+	mkdir -p fuzz/corpus/$(FUZZ) fuzz/corpus/min/$(FUZZ) fuzz/artifacts/$(FUZZ)
 	$(FUZZ_BIN)/$(FUZZ) -max_total_time=$(SECS) -print_final_stats=1 \
-	  -artifact_prefix=fuzz/artifacts/$(FUZZ)/ fuzz/corpus/$(FUZZ) $(FUZZ_SEEDS)
+	  -artifact_prefix=fuzz/artifacts/$(FUZZ)/ fuzz/corpus/$(FUZZ) \
+	  fuzz/corpus/min/$(FUZZ) $(FUZZ_SEEDS)
 
 fuzz-all: fuzz-build
 	for t in $(FUZZ_TARGETS); do \
 	  $(MAKE) --no-print-directory fuzz FUZZ=$$t SECS=$(SECS) || exit 1; \
+	done
+
+# fuzz/corpus/min/<target> keeps only inputs that add coverage: libFuzzer's
+# merge copies an input in when it reaches code the folder doesn't yet, so
+# the folder grows with coverage, not with fuzzing time. Nothing is deleted.
+fuzz-merge: fuzz-build
+	for t in $(FUZZ_TARGETS); do \
+	  mkdir -p fuzz/corpus/$$t fuzz/corpus/min/$$t && \
+	  $(FUZZ_BIN)/$$t -merge=1 fuzz/corpus/min/$$t fuzz/corpus/$$t $(FUZZ_SEEDS) 2>&1 | \
+	    grep -E "MERGE-OUTER: [0-9]+ new files" || exit 1; \
+	done
+
+# Replays the minimal corpus once under Valgrind's memcheck, which sees what
+# a panic can't: reads and writes outside an allocation, or of freed or
+# uninitialised memory, in any code, dependencies' unsafe code included
+# (AddressSanitizer needs nightly). The replay uses its own build without
+# coverage instrumentation: libFuzzer's comparison hooks copy whole
+# registers, padding included, which Valgrind reports as uninitialised.
+# On Arch, Valgrind fetches glibc's symbols through debuginfod (the system
+# must be up to date); on Debian/Ubuntu install libc6-dbg.
+VALGRIND       ?= valgrind
+VALGRIND_FLAGS ?= -q --error-exitcode=99 --exit-on-first-error=yes --leak-check=no
+REPLAY_TARGET_DIR := $(FUZZ_TARGET_DIR)/replay
+REPLAY_BIN     := $(REPLAY_TARGET_DIR)/$(FUZZ_TRIPLE)/release
+fuzz-valgrind: fuzz-merge
+	RUSTFLAGS="--cfg fuzzing -Cdebug-assertions -Coverflow-checks $(RUSTFLAGS)" \
+	  CARGO_TARGET_DIR=$(REPLAY_TARGET_DIR) \
+	  $(CARGO) build --release $(CARGO_FLAGS) --manifest-path fuzz/Cargo.toml \
+	  --target $(FUZZ_TRIPLE) --bins
+	for t in $(FUZZ_TARGETS); do \
+	  echo "== $$t under valgrind: $$(ls fuzz/corpus/min/$$t | wc -l) inputs" && \
+	  $(VALGRIND) $(VALGRIND_FLAGS) $(REPLAY_BIN)/$$t -runs=0 fuzz/corpus/min/$$t || exit 1; \
 	done
 
 fuzz-repro: fuzz-build
