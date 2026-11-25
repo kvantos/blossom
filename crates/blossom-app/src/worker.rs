@@ -34,6 +34,10 @@ use crate::tree::FileInfo;
 /// How long the watcher waits for a burst of changes to settle.
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// Revisions kept per path in [`Open::written`]: the first base and the
+/// latest writes. A save based on an older one is simply merged as stale.
+const CHAIN_LIMIT: usize = 16;
+
 /// How long a save waits for typing to pause.
 pub const SAVE_DELAY: Duration = Duration::from_millis(700);
 
@@ -305,6 +309,33 @@ impl Handle {
     /// Sends `request`; a stopped worker is ignored.
     pub fn send(&self, request: Request) {
         let _ = self.0.send(Input::Request(request));
+    }
+}
+
+/// The requests sent through a [`Handle::recording`].
+#[cfg(test)]
+pub struct Recorder(Receiver<Input>);
+
+#[cfg(test)]
+impl Handle {
+    /// A handle with no worker behind it: what is sent can be read back.
+    pub fn recording() -> (Handle, Recorder) {
+        let (tx, rx) = mpsc::channel();
+        (Handle(tx), Recorder(rx))
+    }
+}
+
+#[cfg(test)]
+impl Recorder {
+    /// The requests sent since the last call.
+    pub fn take(&self) -> Vec<Request> {
+        self.0
+            .try_iter()
+            .filter_map(|i| match i {
+                Input::Request(r) => Some(r),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -1061,6 +1092,9 @@ fn save(o: &mut Open, path: &str, p: Pending, emit: &mut dyn FnMut(Event)) -> bo
                 chain.push(p.base);
             }
             chain.push(Some(revision));
+            if chain.len() > CHAIN_LIMIT {
+                chain.drain(1..chain.len() - (CHAIN_LIMIT - 1));
+            }
             emit(Event::Saved {
                 path: path.to_string(),
                 text: p.text,

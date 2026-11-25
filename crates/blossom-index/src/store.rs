@@ -43,6 +43,8 @@ pub enum IndexError {
     Io(io::Error),
     /// A stored record could not be decoded.
     Corrupt(String),
+    /// The folder holds other files and isn't an index: it is left alone.
+    NotAnIndex(std::path::PathBuf),
 }
 
 impl fmt::Display for IndexError {
@@ -53,6 +55,11 @@ impl fmt::Display for IndexError {
             IndexError::Corrupt(e) => {
                 write!(f, "index is corrupt ({e}); run `blsm index --rebuild`")
             }
+            IndexError::NotAnIndex(p) => write!(
+                f,
+                "{} isn't a Blossom index folder; pick an empty or new folder for the index",
+                p.display()
+            ),
         }
     }
 }
@@ -111,13 +118,18 @@ impl NoteIndex {
     /// Opens the index in folder `dir`, creating it, or recreating it when it
     /// was built by another schema version or with other `settings` (a
     /// fingerprint of whatever changes the records, such as the keywords).
+    /// A folder that holds anything but an index is never touched.
     ///
     /// # Errors
     ///
-    /// On I/O or tantivy errors.
+    /// [`IndexError::NotAnIndex`] for a folder with other files in it; I/O
+    /// or tantivy errors.
     pub fn open(dir: &Path, settings: &str) -> Result<NoteIndex, IndexError> {
         let meta = format!("{SCHEMA_VERSION}\n{settings}\n");
         let meta_path = dir.join(META_FILE);
+        if dir.exists() && !is_index_dir(dir)? {
+            return Err(IndexError::NotAnIndex(dir.to_path_buf()));
+        }
         if fs::read_to_string(&meta_path).ok().as_deref() != Some(meta.as_str()) && dir.exists() {
             clear_dir(dir)?;
         }
@@ -404,6 +416,22 @@ impl NoteIndex {
     pub fn count_all(&self) -> Result<usize, IndexError> {
         Ok(self.docs(&AllQuery)?.len())
     }
+}
+
+/// Whether `dir` may be emptied and used as an index: it is empty (apart
+/// from [`KEEP`]), or it already is one (our meta file, or tantivy's own).
+fn is_index_dir(dir: &Path) -> io::Result<bool> {
+    if dir.join(META_FILE).is_file()
+        || (dir.join("meta.json").is_file() && dir.join(".managed.json").is_file())
+    {
+        return Ok(true);
+    }
+    for entry in fs::read_dir(dir)? {
+        if entry?.file_name() != KEEP {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Empties `dir` except [`KEEP`]: the semantic vectors are keyed by text,

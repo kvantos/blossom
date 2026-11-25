@@ -311,6 +311,26 @@ mod ops {
     }
 
     #[test]
+    fn refile_within_a_file_spelled_differently() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        put(r, "n/a.org", "* one\n* two\n");
+        let v = vault(r);
+        assert!(v.same_file("n/a.org", "n//a.org"));
+        assert!(!v.same_file("n/a.org", "a.org"));
+        assert!(!v.same_file("n/a.org", "../a.org"));
+        let out = v
+            .refile(
+                &h("n/a.org", 0, "one"),
+                "n//a.org",
+                Some(&h("n//a.org", 1, "two")),
+            )
+            .unwrap();
+        assert_eq!(out.changes.len(), 1);
+        assert_eq!(read(r, "n/a.org"), "* two\n** one\n");
+    }
+
+    #[test]
     fn complete_and_capture() {
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();

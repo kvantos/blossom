@@ -389,3 +389,29 @@ fn intros_are_found_by_words_only() {
     assert!(titles(&index, "train").is_empty(), "plain search: headings");
     assert_eq!(index.all().unwrap().len(), 2, "all: headings only");
 }
+
+#[test]
+fn open_never_empties_a_folder_that_is_not_an_index() {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "note.org", "* keep me\n");
+    let err = NoteIndex::open(dir.path(), "settings").err().unwrap();
+    assert!(
+        err.to_string().contains("isn't a Blossom index folder"),
+        "{err}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("note.org")).unwrap(),
+        "* keep me\n"
+    );
+    // A new folder becomes an index; reopening with other settings rebuilds it.
+    let index_dir = dir.path().join("index");
+    drop(NoteIndex::open(&index_dir, "a").unwrap());
+    fs::create_dir_all(index_dir.join("semantic")).unwrap();
+    fs::write(index_dir.join("semantic/x.bin"), "v").unwrap();
+    drop(NoteIndex::open(&index_dir, "b").unwrap());
+    assert!(index_dir.join("semantic/x.bin").exists());
+    // An empty folder (or one holding only vectors) is fine too.
+    let empty = dir.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    drop(NoteIndex::open(&empty, "a").unwrap());
+}

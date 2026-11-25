@@ -988,8 +988,16 @@ impl Document {
 }
 
 /// Emacs's `org-log-note-headings` state note: `- State %-12s from %-12s %t`.
+/// A state is quoted; no state (a heading without a keyword) is blank.
 fn state_change_line(new: &str, old: &str, at: &Timestamp) -> String {
-    let pad = |s: &str| format!("{:<12}", format!("\"{s}\""));
+    let pad = |s: &str| {
+        let quoted = if s.is_empty() {
+            String::new()
+        } else {
+            format!("\"{s}\"")
+        };
+        format!("{quoted:<12}")
+    };
     format!("- State {} from {} {at}", pad(new), pad(old))
 }
 
@@ -1077,4 +1085,22 @@ fn find_cookie(s: &str) -> Option<(Range<usize>, bool)> {
     cookie(false)
         .map(|r| (r, false))
         .or_else(|| cookie(true).map(|r| (r, true)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_note_leaves_a_missing_state_blank() {
+        let at = Timestamp::parse("[2026-11-23 Mon 09:30]").unwrap();
+        assert_eq!(
+            state_change_line("DONE", "TODO", &at),
+            "- State \"DONE\"       from \"TODO\"       [2026-11-23 Mon 09:30]"
+        );
+        assert_eq!(
+            state_change_line("DONE", "", &at),
+            "- State \"DONE\"       from              [2026-11-23 Mon 09:30]"
+        );
+    }
 }

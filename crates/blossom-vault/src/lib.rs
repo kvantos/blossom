@@ -278,6 +278,28 @@ impl Vault {
         Ok(self.root.join(rel))
     }
 
+    /// Whether vault-relative `a` and `b` name one file, however they are
+    /// spelled: `n//a.org` and `n/a.org`, or on a case-insensitive disk
+    /// `A.org` and `a.org` (both must exist for that). Invalid paths name
+    /// no file.
+    #[must_use]
+    pub fn same_file(&self, a: &str, b: &str) -> bool {
+        if a == b {
+            return true;
+        }
+        let (Ok(fa), Ok(fb)) = (self.full_path(a), self.full_path(b)) else {
+            return false;
+        };
+        // `PathBuf` equality compares components, so `//` doesn't matter.
+        if fa == fb {
+            return true;
+        }
+        match (fs::metadata(&fa), fs::metadata(&fb)) {
+            (Ok(ma), Ok(mb)) => same_inode(&ma, &mb, &fa, &fb),
+            _ => false,
+        }
+    }
+
     /// The current revision of `path`, `None` when it doesn't exist.
     ///
     /// # Errors
@@ -428,6 +450,17 @@ impl Vault {
     pub fn watch(&self, debounce: Duration) -> notify::Result<VaultWatcher> {
         VaultWatcher::start(&self.root, debounce)
     }
+}
+
+#[cfg(unix)]
+fn same_inode(a: &fs::Metadata, b: &fs::Metadata, _: &Path, _: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(not(unix))]
+fn same_inode(_: &fs::Metadata, _: &fs::Metadata, a: &Path, b: &Path) -> bool {
+    matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
 
 /// `.name.blsm-<pid>-<n>.tmp` next to `full`: a dot-file, so the walk and the

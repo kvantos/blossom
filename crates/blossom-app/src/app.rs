@@ -98,6 +98,10 @@ pub struct App {
     status: Option<String>,
     /// Closing: waiting for the worker to write pending saves.
     closing: bool,
+    /// A vault to open once the flushes of the current one are done.
+    opening: Option<OpenVault>,
+    /// `Flush` requests not yet answered with `Flushed`.
+    flushes: u32,
     /// A close was refused once because of an unresolved conflict.
     close_warned: bool,
     today: NaiveDate,
@@ -324,6 +328,8 @@ impl App {
             disk: HashMap::new(),
             status: None,
             closing: false,
+            opening: None,
+            flushes: 0,
             close_warned: false,
             today,
             view: if shot.as_ref().is_some_and(|p| p.search.is_some()) {
@@ -766,9 +772,32 @@ impl App {
             root,
             ..self.template.clone()
         };
-        match &self.worker {
-            Some(w) => w.send(Request::Open(open)),
-            None => self.pending = Some(open),
+        if self.worker.is_none() {
+            self.pending = Some(open);
+        } else if self.disk.values().any(DiskState::dirty) {
+            // Unsaved edits are written (and merged, if another program
+            // changed the file) before the old vault goes.
+            self.opening = Some(open);
+            self.flush();
+        } else {
+            self.send(Request::Open(open));
+        }
+    }
+
+    /// Asks the worker to write every waiting save.
+    fn flush(&mut self) {
+        if let Some(w) = &self.worker {
+            self.flushes += 1;
+            w.send(Request::Flush);
+        }
+    }
+
+    /// Sends a save; while closing or switching vaults, flushes it at once,
+    /// so it is written before the app exits or the vault closes.
+    fn send_save(&mut self, request: Request) {
+        self.send(request);
+        if self.closing || self.opening.is_some() {
+            self.flush();
         }
     }
 
@@ -852,8 +881,14 @@ impl App {
             }
             Event::Stale { path, disk } => self.on_disk(path, disk),
             Event::Flushed => {
-                if self.closing {
-                    return iced::exit();
+                self.flushes = self.flushes.saturating_sub(1);
+                if self.flushes == 0 {
+                    if let Some(open) = self.opening.take() {
+                        self.send(Request::Open(open));
+                    }
+                    if self.closing {
+                        return iced::exit();
+                    }
                 }
             }
             Event::Agenda(_)
@@ -1218,13 +1253,11 @@ impl App {
             ds.base_text = Arc::new(doc.text().to_string());
             ds.latest = Arc::new(m.text.clone());
             ds.conflict = None;
-            if let Some(w) = &self.worker {
-                w.send(Request::Save {
-                    path: path.clone(),
-                    text: Arc::clone(&ds.latest),
-                    base: ds.base,
-                });
-            }
+            let save = Request::Save {
+                path: path.clone(),
+                text: Arc::clone(&ds.latest),
+                base: ds.base,
+            };
             if let Some(f) = open {
                 let merged = Document::parse(m.text.clone(), doc.keywords().clone());
                 if f.doc.is_none() {
@@ -1234,6 +1267,7 @@ impl App {
                 }
             }
             self.disk.insert(path, ds);
+            self.send_save(save);
         } else {
             if let Some(f) = open.filter(|f| f.doc.is_none()) {
                 f.show(Arc::new(Document::parse(
@@ -1246,9 +1280,15 @@ impl App {
                 ));
             }
             ds.conflict = Some(DiskCopy::Changed(doc, rev));
-            self.disk.insert(path, ds);
-            // A conflict cancels closing: the user must choose first.
+            // A conflict cancels closing (and opening another vault): the
+            // user must choose first.
             self.closing = false;
+            if self.opening.take().is_some() {
+                self.status = Some(format!(
+                    "{path} changed on disk and conflicts with unsaved edits; choose a version, then open the folder again"
+                ));
+            }
+            self.disk.insert(path, ds);
         }
     }
 
@@ -1472,13 +1512,12 @@ impl App {
             }
             None => return,
         }
-        if let Some(w) = &self.worker {
-            w.send(Request::Save {
-                path: f.path.clone(),
-                text: Arc::clone(&ds.latest),
-                base: ds.base,
-            });
-        }
+        let save = Request::Save {
+            path: f.path.clone(),
+            text: Arc::clone(&ds.latest),
+            base: ds.base,
+        };
+        self.send_save(save);
     }
 
     /// Conflict: the disk version wins; the unsaved text stays one undo away.
@@ -1583,9 +1622,9 @@ impl App {
             return Task::none();
         }
         match &self.worker {
-            Some(w) => {
+            Some(_) => {
                 self.closing = true;
-                w.send(Request::Flush);
+                self.flush();
                 Task::none()
             }
             None => iced::exit(),
@@ -2594,7 +2633,8 @@ fn normalize(path: &str) -> String {
     parts.join("/")
 }
 
-/// Opens a web or mail link with the system handler.
+/// Opens a web or mail link with the system handler. The opener is waited
+/// for on a thread of its own, so it doesn't linger as a zombie.
 fn open_externally(target: &str) -> std::io::Result<()> {
     let opener = if cfg!(target_os = "macos") {
         "open"
@@ -2607,7 +2647,9 @@ fn open_externally(target: &str) -> std::io::Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map(drop)
+        .map(|mut child| {
+            std::thread::spawn(move || drop(child.wait()));
+        })
 }
 
 #[cfg(test)]
@@ -3146,6 +3188,69 @@ mod tests {
         }));
         assert!(!a.disk["a.org"].dirty());
         assert_eq!(a.save_state(a.file.as_ref().unwrap()), "");
+    }
+
+    fn flushes(requests: &[Request]) -> usize {
+        requests
+            .iter()
+            .filter(|r| matches!(r, Request::Flush))
+            .count()
+    }
+
+    fn saves(requests: &[Request]) -> Vec<String> {
+        requests
+            .iter()
+            .filter_map(|r| match r {
+                Request::Save { text, .. } => Some(text.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn closing_waits_for_a_save_merged_during_the_flush() {
+        let (handle, sent) = crate::worker::Handle::recording();
+        let mut a = loaded("* one\n* two\n");
+        let _ = a.update(Message::Worker(Event::Ready(handle)));
+        let _ = a.update(Message::Select(Selected::Heading(1)));
+        let _ = a.update(Message::StartEditing);
+        let _ = a.update(Message::EditorAction(Action::Move(Motion::End)));
+        type_text(&mut a, "!");
+        let _ = a.update(Message::CloseRequested);
+        assert_eq!(flushes(&sent.take()), 1);
+        // The flush's write was refused: Emacs changed heading one. The merge
+        // is saved and flushed again before the app may exit.
+        let _ = a.update(Message::Worker(Event::Stale {
+            path: "a.org".into(),
+            disk: Some((doc("* one (emacs)\n* two\n"), rev(2))),
+        }));
+        let sent_now = sent.take();
+        assert_eq!(saves(&sent_now), ["* one (emacs)\n* two!\n"]);
+        assert_eq!(flushes(&sent_now), 1);
+        let _ = a.update(Message::Worker(Event::Flushed));
+        assert!(a.closing && a.flushes == 1, "still waiting for the merge");
+        let _ = a.update(Message::Worker(Event::Flushed));
+        assert_eq!(a.flushes, 0);
+    }
+
+    #[test]
+    fn switching_vaults_writes_unsaved_edits_first() {
+        let (handle, sent) = crate::worker::Handle::recording();
+        let mut a = loaded("* one\n");
+        let _ = a.update(Message::Worker(Event::Ready(handle)));
+        let _ = a.update(Message::SetKeyword("TODO".into()));
+        let _ = sent.take();
+        a.open_folder(PathBuf::from("/other"));
+        let first = sent.take();
+        assert_eq!(flushes(&first), 1);
+        assert!(!first.iter().any(|r| matches!(r, Request::Open(_))));
+        let _ = a.update(Message::Worker(Event::Flushed));
+        let opened = sent.take();
+        assert!(
+            opened
+                .iter()
+                .any(|r| matches!(r, Request::Open(o) if o.root == std::path::Path::new("/other")))
+        );
     }
 
     #[test]

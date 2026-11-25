@@ -179,6 +179,39 @@ fn archive_and_refile() {
     assert!(env.ok(&["search", "idea"]).starts_with("work.org:3"));
     assert!(!env.run(&["archive", "work.org:1"]).status.success());
     assert!(!env.run(&["refile", "work.org", "in.org"]).status.success());
+    // A line past the end is an error, not the file's first heading.
+    let before = fs::read_to_string(env.vault().join("work.org")).unwrap();
+    let out = env.run(&["archive", "work.org:99"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("the file has 3 lines"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(env.vault().join("work.org")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn index_dir_must_be_an_index_folder() {
+    let env = Env::new(&[("a.org", "* a\n")], CONFIG);
+    let keep = env.dir.path().join("elsewhere");
+    fs::create_dir_all(&keep).unwrap();
+    fs::write(keep.join("keep.txt"), "mine").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_blsm"))
+        .arg("--vault")
+        .arg(env.vault())
+        .arg("--config")
+        .arg(env.dir.path().join("config.toml"))
+        .arg("--index-dir")
+        .arg(&keep)
+        .arg("ls")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(fs::read_to_string(keep.join("keep.txt")).unwrap(), "mine");
 }
 
 #[test]

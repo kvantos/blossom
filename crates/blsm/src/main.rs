@@ -370,12 +370,18 @@ fn heading_at(vault: &Vault, at: &str) -> Result<HeadingRef, Box<dyn Error>> {
         .document(path)
         .map_err(|e| fail(format!("{path}: {e}")))?;
     let text = doc.text();
-    let line_start = |n: usize| -> usize {
+    // Line N starts after the (N-1)th line break; a line past the end is an
+    // error, not the top of the file.
+    let offset = if line <= 1 {
+        Some(0)
+    } else {
         text.match_indices('\n')
-            .nth(n.saturating_sub(2))
-            .map_or(0, |(i, _)| i + 1)
+            .nth(line - 2)
+            .map(|(i, _)| i + 1)
+            .filter(|&i| i < text.len())
     };
-    let offset = if line <= 1 { 0 } else { line_start(line) };
+    let offset =
+        offset.ok_or_else(|| fail(format!("{at}: the file has {} lines", text.lines().count())))?;
     let h = doc
         .headings()
         .iter()

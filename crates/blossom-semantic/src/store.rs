@@ -12,6 +12,7 @@ use std::fs;
 use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use blossom_index::Note;
 
@@ -218,19 +219,28 @@ impl VectorStore {
     ///
     /// On I/O errors.
     pub fn save(&self) -> Result<(), SemanticError> {
+        // Unique per process and save, so the app and `blsm` saving at once
+        // never write into the same temporary file.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let Some(file) = &self.file else {
             return Ok(());
         };
         if let Some(dir) = file.parent() {
             fs::create_dir_all(dir)?;
         }
-        let tmp = file.with_extension("bin.tmp");
-        let mut out = fs::File::create(&tmp)?;
-        out.write_all(&encode(&self.id, self.dims, &self.vectors))?;
-        out.sync_all()?;
-        drop(out);
-        fs::rename(&tmp, file)?;
-        Ok(())
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = file.with_extension(format!("bin.{}-{n}.tmp", std::process::id()));
+        let written = (|| {
+            let mut out = fs::File::create(&tmp)?;
+            out.write_all(&encode(&self.id, self.dims, &self.vectors))?;
+            out.sync_all()?;
+            drop(out);
+            fs::rename(&tmp, file)
+        })();
+        if written.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        Ok(written?)
     }
 
     /// `v` scaled to length 1 (a zero vector stays zero), after checking

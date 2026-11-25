@@ -289,7 +289,7 @@ impl Vault {
             Some(t) => format!("Refiled under {}", t.title),
             None => format!("Refiled to {to_file}"),
         };
-        if to_file == h.path {
+        if self.same_file(to_file, &h.path) {
             let mut l = self.load_heading(h)?;
             if let Some(t) = to
                 && l.doc.heading(t.index).is_none_or(|x| x.title != t.title)
@@ -348,7 +348,7 @@ impl Vault {
         let props = src.doc.archive_properties(h.index, &h.path, &full, now);
         let subtree = stamp_subtree(&src.doc.take_subtree(h.index)?, &self.keywords, &props)?;
         let message = format!("Archived to {}", target.label());
-        let (files, index, path) = if target.file == h.path {
+        let (files, index, path) = if self.same_file(&target.file, &h.path) {
             let index = src.doc.insert_under_path(&target.path, &subtree)?;
             (vec![src], index, h.path.clone())
         } else {

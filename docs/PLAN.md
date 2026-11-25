@@ -202,3 +202,16 @@ Order agreed with the user on 2026-11-24: dependency upgrade, then Linux package
 - [ ] Flatpak / Flathub, macOS signing and notarization: later, need the user's accounts.
 - [ ] Semantic search: planned with the user, see Phase 7 (after packaging).
 - Postponed: nightly fuzzing. The user doesn't want a nightly toolchain; revisit when `cargo-fuzz` works on stable.
+
+## Review fixes (2026-11-25)
+A code review with the user (vault, core edits, index, semantic, app saving, blsm); the orgize fork, the diagram editor and view code were not reviewed.
+- [x] `NoteIndex::open` empties only a folder that is an index (our meta file, or tantivy's `meta.json` + `.managed.json`) or empty apart from `semantic/`; anything else is `IndexError::NotAnIndex`. Before, `blsm --index-dir DIR` deleted DIR's contents.
+- [x] Closing waits for saves merged during the final flush: `App::flushes` counts unanswered `Flush`es, and while closing (or switching vaults) every save the UI sends is followed by a `Flush`. Opening another folder with unsaved edits flushes first and opens on `Flushed`; a conflict cancels it with a message.
+- [x] `blsm archive|refile FILE:LINE` with LINE past the end is an error ("the file has N lines"), not the first heading.
+- [x] The watcher sends an empty batch ("re-list everything") for notify's rescan notices and errors, e.g. an inotify queue overflow.
+- [x] `Vault::same_file` (components, then device + inode): refile and archive treat `n//a.org` or a differently cased name of the same file as one file, instead of copying the heading and failing on the stale source.
+- [x] State notes from a heading without a keyword leave the old state blank, as Emacs does (was `""`).
+- [x] The `xdg-open`/`open` child is waited for on a thread (no zombies).
+- [x] The worker keeps at most 16 revisions per path in its save chain.
+- [x] The vector store's temporary file is unique per process and save, and removed when a save fails.
+- [ ] Open, needs the user: archive locations resolve from the vault root (as Bloom does); Emacs resolves them from the source file's folder and makes `%s` the bare file name.
