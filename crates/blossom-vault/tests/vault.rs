@@ -311,6 +311,46 @@ mod ops {
     }
 
     #[test]
+    fn archive_locations_follow_emacs() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let note = "#+ARCHIVE: archive.org::\n* DONE a\n* DONE b\n* DONE c\n";
+        put(r, "projects/acme.org", note);
+        let v = vault(r);
+        // Relative to the note's folder.
+        let out = v
+            .archive(&h("projects/acme.org", 0, "a"), "%s_archive::", now())
+            .unwrap();
+        assert_eq!(out.path, "projects/archive.org");
+        assert!(read(r, "projects/archive.org").starts_with("* DONE a\n"));
+        // An absolute location inside the vault is mapped into it.
+        let abs = format!("{}/done/%s_archive::", r.display());
+        put(
+            r,
+            "projects/acme.org",
+            &format!("#+ARCHIVE: {abs}\n* DONE b\n"),
+        );
+        let out = v
+            .archive(&h("projects/acme.org", 0, "b"), "%s_archive::", now())
+            .unwrap();
+        assert_eq!(out.path, "done/acme.org_archive");
+        // Outside the vault: refused, nothing written.
+        put(
+            r,
+            "projects/acme.org",
+            "#+ARCHIVE: ../../x.org::\n* DONE c\n",
+        );
+        let err = v
+            .archive(&h("projects/acme.org", 0, "c"), "%s_archive::", now())
+            .unwrap_err();
+        assert!(err.to_string().contains("outside the vault"), "{err}");
+        assert_eq!(
+            read(r, "projects/acme.org"),
+            "#+ARCHIVE: ../../x.org::\n* DONE c\n"
+        );
+    }
+
+    #[test]
     fn refile_within_a_file_spelled_differently() {
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();

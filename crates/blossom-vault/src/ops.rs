@@ -340,10 +340,16 @@ impl Vault {
         now: NaiveDateTime,
     ) -> Result<Outcome, OpError> {
         let mut src = self.load_heading(h)?;
-        let target = src
+        let mut target = src
             .doc
             .archive_target(h.index, &h.path, fallback)
             .ok_or_else(|| OpError::Nothing("no archive location".into()))?;
+        target.file = self.archive_file(&target.file).ok_or_else(|| {
+            OpError::Nothing(format!(
+                "the archive location {} is outside the vault",
+                target.file
+            ))
+        })?;
         let full = self.full_path(&h.path)?.display().to_string();
         let props = src.doc.archive_properties(h.index, &h.path, &full, now);
         let subtree = stamp_subtree(&src.doc.take_subtree(h.index)?, &self.keywords, &props)?;
@@ -368,6 +374,30 @@ impl Vault {
             line,
             message,
         })
+    }
+
+    /// An archive location's file as a vault-relative path: relative ones
+    /// as they are, `~/…` and absolute ones when they point into the vault.
+    /// `None` for a file outside it.
+    fn archive_file(&self, file: &str) -> Option<String> {
+        if !(file.starts_with('~') || file.starts_with('/')) {
+            return self.full_path(file).is_ok().then(|| file.to_string());
+        }
+        let full = crate::config::expand(file);
+        let canonical = self.root().canonicalize().ok();
+        let rel = full
+            .strip_prefix(self.root())
+            .ok()
+            .or_else(|| full.strip_prefix(canonical.as_ref()?).ok())?;
+        let parts: Option<Vec<&str>> = rel
+            .components()
+            .map(|c| match c {
+                std::path::Component::Normal(s) => s.to_str(),
+                _ => None,
+            })
+            .collect();
+        let rel = parts?.join("/");
+        self.full_path(&rel).is_ok().then_some(rel)
     }
 
     /// Undoes `changes` (from an [`Outcome`]): each file goes back to its

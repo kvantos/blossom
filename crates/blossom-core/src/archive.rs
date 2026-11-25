@@ -19,20 +19,26 @@ use crate::timestamp::Timestamp;
 /// Emacs's default `org-archive-location`.
 pub const DEFAULT_LOCATION: &str = "%s_archive::";
 
-/// A parsed archive location: a vault-relative file and a heading path in it.
+/// A parsed archive location: a file and a heading path in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArchiveTarget {
-    /// Vault-relative file.
+    /// Vault-relative file, or a `~/…` or absolute path as written, for the
+    /// caller to map into the vault. A relative location that climbs out of
+    /// the vault keeps its leading `../`, so a vault refuses it.
     pub file: String,
     /// Heading titles, outermost first; empty for the top level.
     pub path: Vec<String>,
 }
 
 impl ArchiveTarget {
-    /// Parses `file[::* Heading[/Sub...]]`. `%s` in the file part is the
-    /// source file, an empty file part means the source file itself, a `./`
-    /// prefix is dropped, and a bare name without an extension gets `.org`.
-    /// `None` for a blank value.
+    /// Parses `file[::* Heading[/Sub...]]` as Emacs does: `%s` in the file
+    /// part is the source file's name (without its folder), a relative file
+    /// is relative to the source file's folder, and an empty file part means
+    /// the source file itself. A bare name without an extension gets `.org`
+    /// (as Bloom does; Emacs would use the name as is). `None` for a blank value.
+    ///
+    /// Bloom resolves the file from the vault root instead; the two agree for
+    /// files at the root and for the default `%s_archive::`.
     #[must_use]
     pub fn parse(raw: &str, source_file: &str) -> Option<ArchiveTarget> {
         let raw = raw.trim();
@@ -40,13 +46,15 @@ impl ArchiveTarget {
             return None;
         }
         let (file, heading) = raw.split_once("::").unwrap_or((raw, ""));
-        let mut file = file
-            .trim()
-            .trim_start_matches("./")
-            .replace("%s", source_file);
-        if file.is_empty() {
-            file = source_file.to_string();
-        }
+        let (dir, name) = source_file.rsplit_once('/').unwrap_or(("", source_file));
+        let file = file.trim().replace("%s", name);
+        let mut file = if file.is_empty() {
+            source_file.to_string()
+        } else if file.starts_with('~') || file.starts_with('/') {
+            file
+        } else {
+            join_relative(dir, &file)
+        };
         let name = file.rsplit('/').next().unwrap_or("");
         if !name.get(1..).is_some_and(|n| n.contains('.')) {
             file.push_str(".org");
@@ -71,6 +79,24 @@ impl ArchiveTarget {
             .collect::<Vec<_>>()
             .join(" › ")
     }
+}
+
+/// `dir/file` with `.` and `..` worked out; a `..` past the top stays.
+fn join_relative(dir: &str, file: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut above = 0;
+    for p in dir.split('/').chain(file.split('/')) {
+        match p {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    above += 1;
+                }
+            }
+            _ => parts.push(p),
+        }
+    }
+    format!("{}{}", "../".repeat(above), parts.join("/"))
 }
 
 impl Document {
@@ -296,6 +322,27 @@ mod tests {
             Some(t("archive.org", &["Done", "2026"]))
         );
         assert_eq!(ArchiveTarget::parse("  ", "a.org"), None);
+        // Emacs's rule: relative to the source file's folder, `%s` its name.
+        assert_eq!(
+            ArchiveTarget::parse("archive.org::", "projects/acme.org"),
+            Some(t("projects/archive.org", &[]))
+        );
+        assert_eq!(
+            ArchiveTarget::parse("../done/%s_archive::", "projects/acme.org"),
+            Some(t("done/acme.org_archive", &[]))
+        );
+        assert_eq!(
+            ArchiveTarget::parse("::* Old", "projects/acme.org"),
+            Some(t("projects/acme.org", &["Old"]))
+        );
+        assert_eq!(
+            ArchiveTarget::parse("~/archive/%s_archive::", "projects/acme.org"),
+            Some(t("~/archive/acme.org_archive", &[]))
+        );
+        assert_eq!(
+            ArchiveTarget::parse("../../x.org::", "projects/acme.org"),
+            Some(t("../x.org", &[]))
+        );
         assert_eq!(t("x.org", &["A", "B"]).label(), "x › A › B");
     }
 
