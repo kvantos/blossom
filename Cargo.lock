@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "blossom-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "blossom-core",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "blossom-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "orgize",
@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "blossom-index"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blossom-core",
  "blossom-vault",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "blossom-semantic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blossom-core",
  "blossom-index",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "blossom-vault"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blossom-core",
  "chrono",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "blsm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blossom-core",
  "blossom-index",
