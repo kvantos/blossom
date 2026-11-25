@@ -524,7 +524,9 @@ impl Document {
         if kept == 0 {
             range.start
         } else {
-            text::line_at(self.text(), range.start + kept - 1).end
+            // The end of the content (a char boundary, unlike its last byte
+            // when the text ends in a multi-byte letter) is on the same line.
+            text::line_at(self.text(), range.start + kept).end
         }
     }
 
@@ -690,6 +692,20 @@ mod tests {
             e.append_line(Some(5), "x"),
             Err(EditError::NoSuchHeading(5))
         );
+        // Text ending in a multi-byte letter (found by fuzzing: it panicked
+        // slicing inside the letter), with and without a final line break.
+        for (text, want) in [
+            ("* a\nкофе\n* b\n", "* a\nкофе\n[[file:x.png]]\n* b\n"),
+            ("* a\nكافيه", "* a\nكافيه\n[[file:x.png]]"),
+            ("* a\ncafé 🌸  \n\n", "* a\ncafé 🌸  \n[[file:x.png]]\n\n"),
+        ] {
+            let mut d = Document::parse(text, crate::Keywords::default());
+            d.append_line(Some(0), "[[file:x.png]]").unwrap();
+            assert_eq!(d.text(), want);
+        }
+        let mut top = Document::parse("Заметка\n* a\n", crate::Keywords::default());
+        top.append_line(None, "x").unwrap();
+        assert_eq!(top.text(), "Заметка\nx\n* a\n");
     }
 
     #[test]
