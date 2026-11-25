@@ -299,6 +299,10 @@ pub enum Event {
     },
     /// Something failed.
     Error(String),
+    /// The worker stopped on an internal error (the message); nothing it
+    /// had waiting was written. A new worker starts with a new
+    /// [`subscription`] id.
+    Stopped(String),
 }
 
 /// Sends requests to the worker. Cheap to clone.
@@ -355,9 +359,24 @@ enum Input {
     Meaning(u64, Event),
 }
 
-/// The subscription that starts the worker and relays its events.
-pub fn subscription() -> Subscription<Event> {
-    Subscription::run(stream)
+/// The subscription that starts the worker and relays its events. A new
+/// `run` number starts a new worker (after one stopped).
+pub fn subscription(run: u32) -> Subscription<Event> {
+    Subscription::run_with(run, |_| stream())
+}
+
+/// Runs `body`, turning a panic into [`Event::Stopped`] so the UI hears of
+/// it instead of waiting forever for answers.
+fn guarded(body: impl FnOnce(&mut dyn FnMut(Event)), emit: &mut dyn FnMut(Event)) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&mut *emit)));
+    if let Err(payload) = result {
+        let why = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .unwrap_or_else(|| "an internal error".to_string());
+        emit(Event::Stopped(why));
+    }
 }
 
 fn stream() -> impl futures::Stream<Item = Event> {
@@ -368,9 +387,10 @@ fn stream() -> impl futures::Stream<Item = Event> {
             let (input_tx, input_rx) = mpsc::channel();
             let looped = input_tx.clone();
             thread::spawn(move || {
-                run(&input_rx, &looped, &mut |event| {
+                let mut emit = |event| {
                     let _ = events_tx.unbounded_send(event);
-                });
+                };
+                guarded(|emit| run(&input_rx, &looped, emit), &mut emit);
             });
             if output.send(Event::Ready(Handle(input_tx))).await.is_err() {
                 return;
@@ -1198,6 +1218,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_panic_is_reported_as_stopped() {
+        let mut events = Vec::new();
+        guarded(
+            |emit| {
+                emit(Event::Flushed);
+                let v: Vec<u8> = Vec::new();
+                let _ = v[1];
+            },
+            &mut |e| events.push(e),
+        );
+        assert!(matches!(events[0], Event::Flushed));
+        assert!(matches!(&events[1], Event::Stopped(why) if why.contains("index out of bounds")));
+        // A body that returns normally reports nothing more.
+        let mut events = Vec::new();
+        guarded(|_| {}, &mut |e| events.push(e));
+        assert!(events.is_empty());
     }
 
     #[test]

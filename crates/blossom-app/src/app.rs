@@ -59,6 +59,10 @@ use crate::style::{self, Chip};
 use crate::tree::{self, FileInfo};
 use crate::worker::{self, Event, Handle, Op, OpenVault, Request, SearchResults};
 
+/// How many times a stopped worker is restarted before edits are written
+/// directly for the rest of the session.
+const WORKER_RESTARTS: u32 = 2;
+
 /// The section editor's widget id, for focusing it.
 const EDITOR_ID: &str = "section-editor";
 
@@ -121,6 +125,12 @@ pub struct App {
     meaning: Option<meaning::Status>,
     /// What to select once its file has loaded: a heading or the intro.
     pending_heading: Option<(String, Selected)>,
+    /// Workers started so far, less one: the worker subscription's id.
+    worker_runs: u32,
+    /// The worker kept stopping: edits are written directly.
+    worker_failed: bool,
+    /// After a worker restart: the file to show again and the message.
+    restarted: Option<(Option<(String, Selected)>, String)>,
     /// The last operation's message, and its changes while it can be undone.
     notice: Option<(String, Option<Vec<Change>>)>,
     /// The capture panel, while open.
@@ -346,6 +356,9 @@ impl App {
             search_meaning,
             meaning: None,
             pending_heading: None,
+            worker_runs: 0,
+            worker_failed: false,
+            restarted: None,
             notice: None,
             capture: None,
             awaiting: Awaiting::Nothing,
@@ -438,9 +451,9 @@ impl App {
     }
 
     /// The worker, system theme changes, keys and close requests.
-    pub fn subscription(_: &Self) -> Subscription<Message> {
+    pub fn subscription(app: &Self) -> Subscription<Message> {
         Subscription::batch([
-            worker::subscription().map(Message::Worker),
+            worker::subscription(app.worker_runs).map(Message::Worker),
             iced::system::theme_changes().map(Message::Mode),
             keyboard::listen().map(Message::Key),
             window::close_requests().map(|_| Message::CloseRequested),
@@ -795,10 +808,93 @@ impl App {
     /// Sends a save; while closing or switching vaults, flushes it at once,
     /// so it is written before the app exits or the vault closes.
     fn send_save(&mut self, request: Request) {
+        if self.worker_failed {
+            if let Request::Save { path, .. } = &request
+                && let Some(problem) = self.write_direct(path)
+            {
+                self.status = Some(problem);
+            }
+            return;
+        }
         self.send(request);
         if self.closing || self.opening.is_some() {
             self.flush();
         }
+    }
+
+    /// Writes `path`'s unsaved text without the worker, with the stale-write
+    /// guard. When the file changed on disk (or conflicts), the text goes to
+    /// `path.unsaved-YYYYMMDD-HHMMSS` beside it instead. Says what went wrong.
+    fn write_direct(&mut self, path: &str) -> Option<String> {
+        let root = self.root.clone()?;
+        let ds = self.disk.get_mut(path).filter(|d| d.dirty())?;
+        let vault = match blossom_vault::Vault::open(
+            &root,
+            self.template.keywords.clone(),
+            &self.template.ignore,
+        ) {
+            Ok(v) => v,
+            Err(e) => return Some(format!("Couldn't save {path}: {e}")),
+        };
+        if ds.conflict.is_none()
+            && let Ok(rev) = vault.write(path, &ds.latest, ds.base)
+        {
+            ds.base = Some(rev);
+            ds.base_text = Arc::clone(&ds.latest);
+            return None;
+        }
+        let copy = format!(
+            "{path}.unsaved-{}",
+            chrono::Local::now().format("%Y%m%d-%H%M%S")
+        );
+        Some(match vault.write(&copy, &ds.latest, None) {
+            Ok(_) => format!("{path} changed on disk; your unsaved text is in {copy}"),
+            Err(e) => format!("Couldn't save {path}: {e}"),
+        })
+    }
+
+    /// The worker stopped on an internal error: writes the unsaved edits
+    /// directly, then starts a new worker (at most [`WORKER_RESTARTS`]
+    /// times; after that edits keep being written directly).
+    fn on_worker_stopped(&mut self, why: &str) -> Task<Message> {
+        self.worker = None;
+        self.flushes = 0;
+        let paths: Vec<String> = self.disk.keys().cloned().collect();
+        let problems: Vec<String> = paths.iter().filter_map(|p| self.write_direct(p)).collect();
+        let saved = if problems.is_empty() {
+            "unsaved edits were written".to_string()
+        } else {
+            problems.join("; ")
+        };
+        if self.closing {
+            return iced::exit();
+        }
+        if self.worker_runs < WORKER_RESTARTS {
+            self.worker_runs += 1;
+            let root = self
+                .opening
+                .take()
+                .map(|o| o.root)
+                .or_else(|| self.root.clone());
+            if let Some(root) = root {
+                self.pending = Some(OpenVault {
+                    root,
+                    ..self.template.clone()
+                });
+            }
+            let file = self.file.as_ref().map(|f| (f.path.clone(), f.selected));
+            let message =
+                format!("Blossom's background worker stopped ({why}) and was restarted; {saved}");
+            self.status = Some(message.clone());
+            self.restarted = Some((file, message));
+        } else {
+            self.worker_failed = true;
+            self.opening = None;
+            self.status = Some(format!(
+                "Blossom's background worker keeps stopping ({why}); {saved}. Edits are now saved directly; please restart Blossom"
+            ));
+        }
+        Task::none()
     }
 
     fn select_file(&mut self, path: String) {
@@ -811,6 +907,36 @@ impl App {
         self.file = Some(OpenFile::loading(path));
     }
 
+    /// A vault is open: everything shown for the old one goes; after a
+    /// worker restart, the file that was open comes back.
+    fn on_opened(&mut self, root: PathBuf) {
+        if self.view == View::Agenda
+            && let Some(w) = &self.worker
+        {
+            w.send(Request::Agenda(agenda::DAYS));
+        }
+        self.agenda = None;
+        self.search = None;
+        self.meaning = None;
+        if self.view == View::Search {
+            self.send_search();
+        }
+        self.notice = None;
+        self.vault_input = root.display().to_string();
+        self.root = Some(root);
+        self.file = None;
+        self.disk.clear();
+        self.collapsed_folders.clear();
+        self.status = None;
+        if let Some((file, message)) = self.restarted.take() {
+            self.status = Some(message);
+            if let Some((path, sel)) = file {
+                self.pending_heading = Some((path.clone(), sel));
+                self.select_file(path);
+            }
+        }
+    }
+
     fn on_worker(&mut self, event: Event) -> Task<Message> {
         match event {
             Event::Ready(handle) => {
@@ -819,26 +945,7 @@ impl App {
                 }
                 self.worker = Some(handle);
             }
-            Event::Opened(root) => {
-                if self.view == View::Agenda
-                    && let Some(w) = &self.worker
-                {
-                    w.send(Request::Agenda(agenda::DAYS));
-                }
-                self.agenda = None;
-                self.search = None;
-                self.meaning = None;
-                if self.view == View::Search {
-                    self.send_search();
-                }
-                self.notice = None;
-                self.vault_input = root.display().to_string();
-                self.root = Some(root);
-                self.file = None;
-                self.disk.clear();
-                self.collapsed_folders.clear();
-                self.status = None;
-            }
+            Event::Opened(root) => self.on_opened(root),
             Event::Files(files) => {
                 self.files = files;
                 if let Some(plan) = &self.shot
@@ -907,6 +1014,7 @@ impl App {
                 self.awaiting = Awaiting::Nothing;
                 self.status = Some(e);
             }
+            Event::Stopped(why) => return self.on_worker_stopped(&why),
         }
         Task::none()
     }
@@ -1304,14 +1412,13 @@ impl App {
             return;
         }
         ds.latest = Arc::new(doc.text().to_string());
-        if ds.conflict.is_none()
-            && let Some(w) = &self.worker
-        {
-            w.send(Request::Save {
+        if ds.conflict.is_none() {
+            let save = Request::Save {
                 path: f.path.clone(),
                 text: Arc::clone(&ds.latest),
                 base: ds.base,
-            });
+            };
+            self.send_save(save);
         }
     }
 
@@ -3231,6 +3338,60 @@ mod tests {
         assert!(a.closing && a.flushes == 1, "still waiting for the merge");
         let _ = a.update(Message::Worker(Event::Flushed));
         assert_eq!(a.flushes, 0);
+    }
+
+    #[test]
+    fn a_stopped_worker_never_loses_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("a.org"), "* one\n").unwrap();
+        let vault = blossom_vault::Vault::open(&root, Keywords::default(), &[]).unwrap();
+        let read = || std::fs::read_to_string(root.join("a.org")).unwrap();
+        let mut a = app();
+        let (handle, _sent) = crate::worker::Handle::recording();
+        let _ = a.update(Message::Worker(Event::Ready(handle)));
+        let _ = a.update(Message::Worker(Event::Opened(root.clone())));
+        let _ = a.update(Message::SelectFile("a.org".into()));
+        let rev = vault.revision("a.org").unwrap();
+        let _ = a.update(Message::Worker(Event::Document(
+            "a.org".into(),
+            doc("* one\n"),
+            rev.unwrap(),
+        )));
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        let _ = a.update(Message::SetKeyword("TODO".into()));
+        // The worker dies with the save still waiting: the app writes it and
+        // starts a new worker, which reopens the vault and the file.
+        let _ = a.update(Message::Worker(Event::Stopped("boom".into())));
+        assert_eq!(read(), "* TODO one\n");
+        assert!(a.worker.is_none());
+        assert_eq!(a.worker_runs, 1);
+        assert_eq!(a.pending.as_ref().map(|o| &o.root), Some(&root));
+        assert!(a.status.as_deref().unwrap().contains("restarted"));
+        let _ = a.update(Message::Worker(Event::Opened(root.clone())));
+        assert_eq!(a.file.as_ref().map(|f| f.path.as_str()), Some("a.org"));
+        assert!(a.status.as_deref().unwrap().contains("restarted"));
+        let rev = vault.revision("a.org").unwrap();
+        let _ = a.update(Message::Worker(Event::Document(
+            "a.org".into(),
+            doc("* TODO one\n"),
+            rev.unwrap(),
+        )));
+        // It keeps stopping: no more restarts, edits are written at once.
+        for _ in 0..WORKER_RESTARTS {
+            let _ = a.update(Message::Worker(Event::Stopped("boom".into())));
+        }
+        assert!(a.worker_failed);
+        assert_eq!(a.worker_runs, WORKER_RESTARTS);
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        let _ = a.update(Message::SetKeyword(NONE.into()));
+        assert_eq!(read(), "* one\n");
+        // Another program changed the file: the text is kept beside it.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(root.join("a.org"), "* emacs\n").unwrap();
+        let _ = a.update(Message::SetKeyword("TODO".into()));
+        assert_eq!(read(), "* emacs\n");
+        assert!(a.status.as_deref().unwrap().contains("a.org.unsaved-"));
     }
 
     #[test]
