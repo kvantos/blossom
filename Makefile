@@ -71,7 +71,8 @@ build:
 check:
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy $(CARGO_FLAGS) --workspace --all-targets -- -D warnings
-	$(CARGO) test $(CARGO_FLAGS) --workspace
+	$(CARGO) clippy $(CARGO_FLAGS) --workspace --all-targets --all-features -- -D warnings
+	$(CARGO) test $(CARGO_FLAGS) --workspace --all-features
 
 # The built binaries must exist; install doesn't build (see the top).
 $(RELEASE)/blossom $(RELEASE)/blsm:

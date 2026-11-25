@@ -31,6 +31,25 @@ pub struct Config {
     pub capture: Vec<CaptureConfig>,
     /// The attachments folder name, beside each org file. Default `attachments`.
     pub attachments: Option<String>,
+    /// Semantic search (`[semantic]`).
+    pub semantic: SemanticConfig,
+}
+
+/// The `[semantic]` table. Every field is optional; with none, search by
+/// meaning uses the built-in English model.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SemanticConfig {
+    /// `english` (default), `multilingual` or `server`.
+    pub model: Option<String>,
+    /// For `server`: an OpenAI-compatible API base, default
+    /// `http://localhost:11434/v1` (Ollama).
+    pub server: Option<String>,
+    /// For `server`: the embedding model name, default `nomic-embed-text`.
+    pub server_model: Option<String>,
+    /// For `server`: the environment variable holding an API key, if the
+    /// server needs one (e.g. `OPENAI_API_KEY`).
+    pub api_key_env: Option<String>,
 }
 
 /// One `[[capture]]` table.
@@ -283,6 +302,13 @@ pub fn index_dir(vault: &Path) -> Option<PathBuf> {
     )
 }
 
+/// The platform data folder (`~/.local/share/blossom` on Linux,
+/// `~/Library/Application Support/blossom` on macOS), for downloaded models.
+#[must_use]
+pub fn data_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "blossom").map(|d| d.data_dir().to_path_buf())
+}
+
 /// FNV-1a: stable across Rust versions, unlike `DefaultHasher`.
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
@@ -293,6 +319,25 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_semantic_table() {
+        let c: Config = toml::from_str(
+            "[semantic]\nmodel = \"server\"\nserver = \"http://h/v1\"\nserver_model = \"m\"\napi_key_env = \"KEY\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.semantic,
+            SemanticConfig {
+                model: Some("server".into()),
+                server: Some("http://h/v1".into()),
+                server_model: Some("m".into()),
+                api_key_env: Some("KEY".into()),
+            }
+        );
+        assert_eq!(Config::default().semantic, SemanticConfig::default());
+        assert!(toml::from_str::<Config>("[semantic]\nmodle = \"x\"\n").is_err());
+    }
 
     #[test]
     fn parses_all_fields() {

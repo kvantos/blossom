@@ -23,6 +23,12 @@ blossom-core = { path = "crates/blossom-core" }
 blossom-vault = { path = "crates/blossom-vault" }
 blossom-index = { path = "crates/blossom-index" }
 blossom-semantic = { path = "crates/blossom-semantic" }
+candle-core = "0.11.1"
+candle-nn = "0.11.1"
+candle-transformers = "0.11.1"
+sha2 = "0.11.1"
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
+ureq = { version = "3.5.2", features = ["json"] }
 arboard = { version = "3.7", default-features = false, features = ["image-data", "wayland-data-control"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4.6", features = ["derive"] }

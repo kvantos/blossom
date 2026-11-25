@@ -28,8 +28,11 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Also with the built-in models (candle), which are behind a feature.
+      - name: Clippy (all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
       # The fuzz targets need nightly to run, but must keep compiling.
       - name: Check fuzz targets
         if: runner.os == 'Linux'
