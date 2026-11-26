@@ -193,6 +193,27 @@ Notes from Phase 8:
 - Fonts: iced needs `'static` family names, so each chosen name is interned (leaked once). The editor's highlighter carries the family in each highlight (`editor::Mark`), because iced's format callback is a plain `fn`. The font list is read on first opening the panel, in a task.
 - `settings.toml` (`colours = "gray"`, `mode = "dark"`, `read_font`, `read_size`, `editor_font`, `editor_size`; sizes clamped); a missing or broken file gives the defaults (a broken one is reported on stderr). Written via temp file + rename.
 
+## Phase 9: UI and UX rework
+Agreed with the user 2026-11-26, from their notes (`~/Notes/inbox.org`, headings tagged `:blossom:`).
+- [x] Agenda layout: three interactive sketches (one calendar; timeline on top with calendar below; cards and a list). The user chose the timeline on top with the calendar below (2026-11-26).
+- [ ] Top bar with icons: show/hide sidebar, a global search field, Agenda, Capture, Settings. Search, Agenda, Capture and Appearance leave the sidebar. Hovering an icon for about a second shows a hint saying what it does and its shortcut. Setting "Top bar labels": none (hints on hover, default), under the icons, or beside them; with labels shown there are no hover hints.
+- [ ] Sidebar lists only the `.org` files, plus a "New file" button: the user types a name (`.org` is added; optional folder and `#+TITLE:`), the app creates the file and opens it. One file per project or topic is the intended way to organise notes.
+- [ ] On startup open the last open file, else `inbox.org`, else nothing.
+- [ ] One config file (changes the Phase 8 rule "the app never writes config.toml", user 2026-11-26): `~/.config/blossom/config.toml` is created on first launch with every option, its default and a one-line description as comments. The app reads it, applies hand edits while it runs (file watching), and writes changes made in the GUI back with `toml_edit`, keeping the user's comments and order. `settings.toml` is read once, moved into it, then deleted. The notes folder chosen on first launch is saved there (native folder picker), so later launches open it.
+- [ ] Settings panel (top bar): appearance and fonts (from the Appearance panel), notes folder, semantic search model (choose, download with progress, server address and model), agenda (week start, working hours, extra time zones), top bar labels, Emacs keys.
+- [ ] Emacs keys in the editor: C-f/b/n/p, C-a/e, M-f/b, C-d, M-d, M-DEL, C-k (kills the rest of the line; a second C-k in a row adds to the same kill), C-y (yanks the last kill), M-</M->. A Settings switch turns them off, on by default.
+- [ ] App actions move to Ctrl+Shift on Linux so plain Ctrl keys belong to the editor (user 2026-11-26): Capture Ctrl+Shift+N, Edit Ctrl+Shift+E, Open folder Ctrl+Shift+O, paste image Ctrl+Shift+V; Agenda Ctrl+Shift+A and Search Ctrl+Shift+F stay as they are; redo becomes Ctrl+Shift+Z (C-y is yank). macOS keeps Cmd, which doesn't clash.
+- [ ] Capture opens the normal editor on the filled-in template (cursor at `%?`) instead of the small panel; saving files the entry, cancelling discards it.
+- [ ] Agenda rebuilt to the chosen layout (sketch: `docs/agenda-sketch.html`):
+  - Views Week, Month, Quarter (for quarterly goals) and Year, with previous/next and Today. The 3-month calendar (previous, current, next; days with items get dots in their file's colour) sits on top in Week and Month.
+  - "Ongoing" timeline on top, collapsible (collapsed it shows a one-line summary such as "7 ongoing · 2 behind · 1 late"; the state is remembered). Ongoing items are a heading with both SCHEDULED (start) and DEADLINE (end), or an active range `<a>--<b>`. Rows grouped by file; bar fill is progress from the `[n/m]` or `[n%]` cookie, else checkboxes, else child TODOs, else no fill; a today line; a flag at a DEADLINE; a late item gets a red dashed tail to today with "N days late"; a status (On track, Behind, N days left, Starts …, Done).
+  - Calendar below with the one-day items (SCHEDULED or DEADLINE alone, active timestamps): Week is an Outlook-style hour grid, Month a day grid, Quarter and Year mini months. Hover (or keyboard focus) shows the title, file, time, the first lines of the body and the org timestamp.
+  - Week grid covers 24 hours and opens scrolled to the working hours, which are shaded lighter; the rest is reached by scrolling. Working hours are a setting (default 08:00–20:00).
+  - Up to two extra time zones (optional, none by default), each as its own hour column beside the local one, like Outlook; the hover card also gives a timed item's time in those zones. Org timestamps carry no zone, so their times are local. Needs a time zone database crate (e.g. `jiff` or `chrono-tz`): ask before adding.
+  - Week start: follow system (default; Linux `LC_TIME` first weekday, macOS the system calendar; Monday when unknown), or Monday, Sunday or Saturday. Used by the agenda and the mini calendars.
+  - Departure from Bloom: Bloom shows a heading with both dates on one day only.
+- [ ] Agenda file filter: all files or a chosen set, from a menu; the choice is remembered.
+
 ## Later
 Order agreed with the user on 2026-11-24: dependency upgrade, then Linux packages, then semantic search (planned first).
 - [x] `blsm` name-clash check: the user found no `blsm` binary or package on crates.io, AUR, Debian or Homebrew (2026-11-24).

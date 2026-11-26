@@ -1,0 +1,706 @@
+<title>Blossom Agenda Sketches</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/* Layout: a reading column for prose; the agenda mockup is a wide app window that scrolls sideways on its own when narrow, with a Settings card under it that drives it. Colours are Blossom's own pink palette. */
+:root {
+  --bg: #fdfbfc; --surface: #ffffff; --sunk: #f7f1f4; --off: #f3ecef; --line: #eadfe4; --line-2: #f1e9ed;
+  --fg: #2b2427; --muted: #7a6a71; --accent: #c2457a; --danger: #c0392b; --success: #2e7d4f; --warn: #a86a00;
+  --f-blossom: #c2457a; --f-work: #3567b0; --f-home: #2e7d5b; --f-study: #9a6400;
+  --display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --shadow: 0 1px 2px rgb(60 20 40 / .06), 0 8px 28px rgb(60 20 40 / .08);
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #1e1b1d; --surface: #262225; --sunk: #1a1719; --off: #201c1f; --line: #3a3337; --line-2: #2f292c;
+  --fg: #e9e3e6; --muted: #a6979e; --accent: #e58fb1; --danger: #f08080; --success: #8fcf9c; --warn: #e7c27d;
+  --f-blossom: #e58fb1; --f-work: #8fb4ea; --f-home: #86cba6; --f-study: #e7c27d;
+  --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 8px 28px rgb(0 0 0 / .35); color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #1e1b1d; --surface: #262225; --sunk: #1a1719; --off: #201c1f; --line: #3a3337; --line-2: #2f292c;
+  --fg: #e9e3e6; --muted: #a6979e; --accent: #e58fb1; --danger: #f08080; --success: #8fcf9c; --warn: #e7c27d;
+  --f-blossom: #e58fb1; --f-work: #8fb4ea; --f-home: #86cba6; --f-study: #e7c27d;
+  --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 8px 28px rgb(0 0 0 / .35); color-scheme: dark; }
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.55 var(--body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 40px 72px; }
+.wrap { max-width: 1080px; margin: 0 auto; display: flex; flex-direction: column; gap: 48px; }
+.prose { max-width: 68ch; }
+h1, h2, h3 { font-family: var(--display); font-weight: 600; text-wrap: balance; margin: 0; letter-spacing: -.01em; }
+h1 { font-size: clamp(28px, 4.5vw, 40px); line-height: 1.1; }
+h2 { font-size: 22px; line-height: 1.2; }
+h3 { font-size: 16px; }
+p { margin: 0; }
+.eyebrow { font: 600 12px/1 var(--body); text-transform: uppercase; letter-spacing: .08em; color: var(--accent); }
+.lede { color: var(--muted); font-size: 17px; }
+header.top { display: flex; flex-direction: column; gap: 14px; }
+code { font-family: var(--mono); font-size: 12.5px; }
+.kinds { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.kind { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.kind pre { margin: 0; background: var(--sunk); border-radius: 6px; padding: 10px 12px; overflow-x: auto; font: 12.5px/1.6 var(--mono); color: var(--fg); }
+.kind .k { color: var(--accent); }
+.kind p { color: var(--muted); font-size: 14px; }
+section.blk { display: flex; flex-direction: column; gap: 16px; }
+
+/* ---------- app window mockup ---------- */
+.scroller { overflow-x: auto; margin-inline: -4px; padding: 4px 4px 12px; }
+.frame { min-width: 980px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; font-size: 13px; }
+.appbar { display: flex; align-items: center; gap: 4px; padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--sunk); }
+.tb { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; color: var(--muted); border-radius: 7px; padding: 6px; cursor: pointer; font: 500 11.5px/1 var(--body); }
+.tb:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); color: var(--fg); }
+.tb.on { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+.tb svg { width: 16px; height: 16px; flex: none; }
+.tb .lab { display: none; }
+.appbar.lab-below .tb { flex-direction: column; gap: 3px; padding: 5px 8px 4px; }
+.appbar.lab-below .tb .lab, .appbar.lab-right .tb .lab { display: inline; }
+.appbar.lab-right .tb { padding: 6px 10px 6px 8px; }
+.appbar .search { flex: 1; max-width: 420px; height: 28px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: flex; align-items: center; padding: 0 10px; gap: 8px; font-size: 12.5px; margin-inline: 6px; }
+#hint { position: fixed; z-index: 60; background: var(--fg); color: var(--bg); font-size: 12px; line-height: 1.4; padding: 6px 9px; border-radius: 6px; max-width: 260px; pointer-events: none; }
+#hint kbd { font: 11px var(--mono); opacity: .75; margin-left: 4px; }
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); position: relative; }
+.toolbar .title { font: 600 16px/1 var(--display); margin-left: 6px; min-width: 210px; }
+.btn { font: 500 12.5px/1 var(--body); color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 7px; height: 28px; padding: 0 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.btn:hover { background: var(--sunk); }
+.btn:focus-visible, [data-id]:focus-visible, .seg button:focus-visible, .mini td button:focus-visible, .tb:focus-visible, .tl-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { font: 500 12.5px/1 var(--body); color: var(--muted); background: var(--surface); border: 0; height: 26px; padding: 0 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: color-mix(in srgb, var(--accent) 14%, var(--surface)); color: var(--accent); }
+.menu { position: absolute; right: 14px; top: 44px; z-index: 5; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; box-shadow: var(--shadow); padding: 6px; min-width: 200px; display: flex; flex-direction: column; }
+.menu label { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.menu label:hover { background: var(--sunk); }
+.menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
+.menu input { accent-color: var(--accent); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex: none; display: inline-block; }
+
+/* mini months */
+.strip { display: flex; gap: 28px; padding: 12px 16px; border-bottom: 1px solid var(--line); justify-content: center; }
+.mini { border-collapse: collapse; font-size: 11px; }
+.mini caption { font: 600 12px/1 var(--display); text-align: left; padding: 0 0 6px 4px; }
+.mini th { font-weight: 500; color: var(--muted); width: 26px; height: 18px; font-size: 10px; }
+.mini td { padding: 0; text-align: center; }
+.mini td button { width: 26px; height: 24px; border: 0; background: none; color: var(--fg); font: 11px/1 var(--body); border-radius: 6px; cursor: pointer; position: relative; padding: 0 0 5px; font-variant-numeric: tabular-nums; }
+.mini td button:hover { background: var(--sunk); }
+.mini td.out button { color: var(--muted); opacity: .45; }
+.mini td.inview button { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.mini td.today button { color: var(--accent); font-weight: 600; box-shadow: inset 0 0 0 1.5px var(--accent); }
+.mini .ds { position: absolute; left: 0; right: 0; bottom: 3px; display: flex; justify-content: center; gap: 2px; }
+.mini .ds i { width: 4px; height: 4px; border-radius: 50%; background: var(--c); }
+.yr { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px 24px; padding: 18px 20px; justify-items: center; }
+.yr.q { grid-template-columns: repeat(3, 1fr); }
+.yr .mini td button { width: 30px; height: 26px; }
+.yr .mini th { width: 30px; }
+.yr.q .mini td button { width: 38px; height: 32px; font-size: 12px; }
+.yr.q .mini th { width: 38px; }
+
+/* bars and chips */
+.bar { --c: var(--accent); position: relative; height: 22px; border-radius: 5px; overflow: hidden; display: flex; align-items: center; padding: 0 8px; gap: 6px; cursor: default; min-width: 0;
+  background: color-mix(in srgb, var(--c) 14%, var(--surface)); border: 1px solid color-mix(in srgb, var(--c) 40%, transparent); font-size: 12px; }
+.bar > i { position: absolute; inset: 0 auto 0 0; background: color-mix(in srgb, var(--c) 30%, var(--surface)); }
+.bar > span { position: relative; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.bar > small { position: relative; color: var(--muted); white-space: nowrap; margin-left: auto; font-variant-numeric: tabular-nums; }
+.bar.late { border: 1px dashed var(--danger); }
+.bar.done { opacity: .55; }
+.bar.cl { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.bar.cr { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.chip { --c: var(--accent); display: flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 2px 5px; border-radius: 4px; white-space: nowrap; overflow: hidden; min-width: 0; cursor: default; }
+.chip:hover { background: var(--sunk); }
+.chip > b { width: 7px; height: 7px; border-radius: 50%; background: var(--c); flex: none; }
+.chip time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.chip em { font-style: normal; font-size: 10px; font-weight: 600; color: var(--danger); text-transform: uppercase; letter-spacing: .04em; }
+.chip span { overflow: hidden; text-overflow: ellipsis; }
+.chip.done span { text-decoration: line-through; color: var(--muted); }
+.more { font-size: 11px; color: var(--muted); padding: 1px 5px; }
+
+/* calendar week */
+.wk, .allday, .tgrid { display: grid; grid-template-columns: var(--gut) repeat(7, minmax(0, 1fr)); }
+.wk .zh { font-size: 10px; color: var(--muted); padding: 8px 4px 6px; text-align: right; line-height: 1.25; align-self: end; }
+.wk .zh b { display: block; font-weight: 600; color: var(--fg); font-size: 10.5px; }
+.wk .zh.loc b { color: var(--accent); }
+.wk .dh { padding: 8px 8px 6px; border-left: 1px solid var(--line-2); font-size: 12px; color: var(--muted); }
+.wk .dh b { font: 600 18px/1 var(--display); color: var(--fg); margin-left: 4px; }
+.wk .dh.today b { color: var(--accent); }
+.wk .dh.today { box-shadow: inset 0 -2px 0 var(--accent); }
+.allday { row-gap: 3px; padding: 6px 0; border-block: 1px solid var(--line); background: var(--sunk); }
+.allday .lbl { grid-row: 1 / -1; font-size: 10.5px; color: var(--muted); padding: 3px 8px; text-align: right; }
+.allday .cell { display: flex; flex-direction: column; gap: 1px; padding: 0 3px; min-width: 0; }
+.tscroll { overflow-y: auto; position: relative; scrollbar-width: thin; }
+.hrs div { height: var(--H); font-size: 10.5px; color: var(--muted); text-align: right; padding-right: 6px; transform: translateY(-7px); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hrs.alt div { color: color-mix(in srgb, var(--muted) 80%, transparent); font-size: 10px; }
+.hrs div.work { color: var(--fg); }
+.hrs div small { display: block; font-size: 9px; color: var(--accent); line-height: 1; }
+.hrs.loc { border-right: 1px solid var(--line); }
+.col { position: relative; border-left: 1px solid var(--line-2); background: var(--off); }
+.col .wh { position: absolute; left: 0; right: 0; background: var(--surface); }
+.col.today .wh { background: color-mix(in srgb, var(--accent) 4%, var(--surface)); }
+.col.wkend .wh { background: color-mix(in srgb, var(--off) 55%, var(--surface)); }
+.col .lines { position: absolute; inset: 0; background: repeating-linear-gradient(to bottom, transparent 0 calc(var(--H) - 1px), var(--line-2) calc(var(--H) - 1px) var(--H)); pointer-events: none; }
+.ev { --c: var(--accent); position: absolute; left: 3px; right: 4px; border-radius: 5px; padding: 3px 6px; font-size: 11.5px; line-height: 1.3; overflow: hidden; cursor: default; z-index: 1;
+  background: color-mix(in srgb, var(--c) 18%, var(--surface)); border-left: 3px solid var(--c); }
+.ev time { display: block; color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.ev b { font-weight: 600; }
+.ev.done { opacity: .55; }
+.now { position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid var(--accent); z-index: 2; }
+.now::before { content: ""; position: absolute; left: -4px; top: -5px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+
+/* calendar month */
+.mh { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
+.mh div { font-size: 11px; color: var(--muted); padding: 6px 8px; text-transform: uppercase; letter-spacing: .05em; }
+.mw { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); row-gap: 2px; border-bottom: 1px solid var(--line-2); padding-bottom: 6px; min-height: 96px; align-content: start; }
+.mw .bg { border-left: 1px solid var(--line-2); grid-row: 1 / -1; }
+.mw .bg:first-child { border-left: 0; }
+.mw .bg.wkend { background: color-mix(in srgb, var(--sunk) 70%, transparent); }
+.mw .bg.today { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.mw .num { padding: 5px 8px 2px; font: 500 12px/1 var(--body); font-variant-numeric: tabular-nums; }
+.mw .num.out { color: var(--muted); opacity: .5; }
+.mw .num.today span { background: var(--accent); color: var(--bg); border-radius: 99px; padding: 2px 6px; }
+.mw .cell { display: flex; flex-direction: column; gap: 1px; padding: 0 3px; min-width: 0; }
+
+/* timeline */
+.tl { border-bottom: 1px solid var(--line); }
+.tl-toggle { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; background: none; color: var(--fg); padding: 10px 14px; cursor: pointer; text-align: left; font: inherit; }
+.tl-toggle:hover { background: var(--sunk); }
+.tl-toggle h4 { margin: 0; font: 600 13px/1 var(--display); }
+.tl-toggle .chev { width: 16px; height: 16px; color: var(--muted); transition: transform .15s; }
+.tl-toggle[aria-expanded="false"] .chev { transform: rotate(-90deg); }
+.tl-toggle small { color: var(--muted); font-size: 12px; }
+.sum { display: inline-flex; gap: 6px; }
+.tl-body { padding: 0 14px 14px; }
+.tl-grid { display: grid; grid-template-columns: 210px minmax(0, 1fr); }
+.tl-scale { position: relative; height: 22px; border-bottom: 1px solid var(--line); }
+.tl-scale span { position: absolute; top: 4px; font-size: 10.5px; color: var(--muted); transform: translateX(-50%); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tl-scale span.l { transform: none; padding-left: 4px; }
+.tl-scale span.q { font-weight: 600; color: var(--fg); }
+.tl-scale span.today { color: var(--accent); font-weight: 600; }
+.tl-group { grid-column: 1 / -1; display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 600; color: var(--muted); padding: 10px 0 4px; text-transform: uppercase; letter-spacing: .05em; }
+.tl-name { font-size: 12.5px; padding: 0 10px 0 16px; display: flex; flex-direction: column; justify-content: center; min-width: 0; height: 34px; }
+.tl-name span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.tl-name small { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.tl-track { position: relative; height: 34px; }
+.tl-track .bar { position: absolute; top: 6px; height: 22px; }
+.tl-cols { position: absolute; inset: 0; pointer-events: none; }
+.tl-cols i { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line-2); }
+.tl-cols i.strong { border-left-color: var(--line); }
+.tl-cols i.wkend { border-left: 0; background: color-mix(in srgb, var(--sunk) 80%, transparent); }
+.tl-today { position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--accent); z-index: 2; pointer-events: none; }
+.tl-late { position: absolute; top: 16px; height: 0; border-top: 2px dashed var(--danger); }
+.tl-late b { position: absolute; right: 0; top: -17px; font: 600 10px/1 var(--body); color: var(--danger); white-space: nowrap; }
+.flag { position: absolute; top: 2px; width: 2px; height: 30px; background: var(--c); }
+.flag::after { content: ""; position: absolute; left: 2px; top: 0; border-left: 7px solid var(--c); border-block: 4px solid transparent; }
+.empty { color: var(--muted); padding: 4px 2px 6px; font-size: 12.5px; }
+.sub { font: 600 11px/1 var(--body); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); padding: 10px 14px 6px; display: flex; gap: 8px; align-items: center; }
+.sub small { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.pill { font: 600 10.5px/1 var(--body); padding: 3px 7px; border-radius: 99px; white-space: nowrap; }
+.pill.ok { color: var(--success); background: color-mix(in srgb, var(--success) 14%, transparent); }
+.pill.behind { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.pill.late { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.pill.soon, .pill.done { color: var(--muted); background: var(--sunk); }
+
+/* settings card */
+.settings { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; display: flex; flex-direction: column; gap: 18px; }
+.settings header { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.settings header p { color: var(--muted); font-size: 14px; }
+.sgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px 28px; }
+.field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.field > span { font: 600 12px/1.2 var(--body); }
+.field small { color: var(--muted); font-size: 12px; }
+.field .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+select { font: 13px var(--body); color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; height: 30px; padding: 0 8px; max-width: 100%; }
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* tooltip */
+#tip { position: fixed; z-index: 50; max-width: 310px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 12px 14px; font-size: 12.5px; display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
+#tip .t { font-weight: 600; font-size: 13.5px; display: flex; gap: 8px; align-items: center; }
+#tip .w { color: var(--muted); font-variant-numeric: tabular-nums; }
+#tip .org { color: var(--muted); background: var(--sunk); border-radius: 5px; padding: 5px 7px; font: 11px/1.5 var(--mono); white-space: pre-wrap; }
+#tip .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+#tip .zones { display: flex; gap: 12px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+#tip .zones span { color: var(--muted); }
+#tip .zones b { color: var(--fg); font-weight: 600; }
+
+.done-list { display: flex; flex-direction: column; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.done-list li { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; }
+.done-list li::before { content: "✓"; color: var(--success); font-weight: 600; }
+.done-list p + p { color: var(--muted); font-size: 14px; margin-top: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header class="top prose">
+    <span class="eyebrow">Phase 9 · agenda · round 2</span>
+    <h1>Timeline on top, calendar below</h1>
+    <p class="lede">Option B with your notes: a collapsible timeline, a Quarter view, up to two extra time zones in Week, a 24-hour grid that opens on your working hours, a week-start setting, and top-bar hints. Today is set to Thursday 26 November 2026.</p>
+  </header>
+
+  <section class="kinds" aria-label="The two kinds of agenda items">
+    <div class="kind">
+      <h3>On the calendar: one day</h3>
+      <p>SCHEDULED or DEADLINE alone, or a plain timestamp. Times are local: org timestamps have no time zone.</p>
+<pre>** Design review
+   <span class="k">&lt;2026-11-26 Thu 10:00&gt;</span>
+** TODO Pay rent
+   <span class="k">DEADLINE: &lt;2026-11-26 Thu&gt;</span></pre>
+    </div>
+    <div class="kind">
+      <h3>On the timeline: start to end</h3>
+      <p>A heading with both SCHEDULED and DEADLINE, or a date range. Progress comes from the cookie, else checkboxes, else child TODOs.</p>
+<pre>** TODO Blossom 1.0 beta [3/8]
+   <span class="k">SCHEDULED: &lt;2026-10-01 Thu&gt; DEADLINE: &lt;2026-12-31 Thu&gt;</span>
+** Kitchen renovation
+   <span class="k">&lt;2026-11-09 Mon&gt;--&lt;2026-12-20 Sun&gt;</span></pre>
+    </div>
+  </section>
+
+  <section class="blk" aria-label="Agenda sketch">
+    <div class="scroller"><div class="frame" id="frame"></div></div>
+
+    <div class="settings" id="settings">
+      <header><h2>Settings</h2><p>These would live in the app's Settings panel. Change them and the sketch above follows.</p></header>
+      <div class="sgrid">
+        <label class="field"><span>Week starts on</span>
+          <select id="s-ws"><option value="system">Follow system</option><option value="1">Monday</option><option value="0">Sunday</option><option value="6">Saturday</option></select>
+          <small id="s-ws-note"></small></label>
+        <div class="field"><span>Working hours</span>
+          <div class="row"><select id="s-wh0" aria-label="Working hours start"></select><span>to</span><select id="s-wh1" aria-label="Working hours end"></select></div>
+          <small>Shaded lighter in Week; the grid opens on them.</small></div>
+        <div class="field"><span>Other time zones</span>
+          <div class="row"><select id="s-tz0" aria-label="Second time zone"></select><select id="s-tz1" aria-label="Third time zone"></select></div>
+          <small id="s-tz-note"></small></div>
+        <label class="field"><span>Top bar labels</span>
+          <select id="s-lab"><option value="none">None, hint on hover</option><option value="below">Under the icons</option><option value="right">Beside the icons</option></select>
+          <small>With labels shown, there are no hover hints.</small></label>
+      </div>
+    </div>
+  </section>
+
+  <section class="blk prose">
+    <h2>Settled</h2>
+    <ul class="done-list">
+      <li><div><p><b>Timeline collapses.</b></p><p>Click its header. Closed, it keeps a one-line summary: how many are ongoing, behind and late. The app remembers the choice.</p></div></li>
+      <li><div><p><b>Quarter view</b> for quarterly goals.</p><p>The timeline shows the quarter by week with month labels; the calendar shows its three months. Year shows quarter lines too.</p></div></li>
+      <li><div><p><b>Two more time zones</b>, optional.</p><p>Each gets its own hour column beside yours, as in Outlook, and a timed item's hover card lists its time there. A time zone database crate is needed; I'll ask before adding one.</p></div></li>
+      <li><div><p><b>24-hour week grid</b>, opening on your working hours (default 08:00–20:00), the rest shaded and reached by scrolling.</p></div></li>
+      <li><div><p><b>Week start</b> follows the system by default; Monday, Sunday or Saturday can be chosen.</p></div></li>
+      <li><div><p><b>Top-bar hints</b> after about a second, or labels under or beside the icons instead.</p></div></li>
+    </ul>
+  </section>
+</div>
+<div id="tip" hidden></div>
+<div id="hint" hidden></div>
+
+<script>
+(() => {
+const DAY = 864e5;
+const d = s => { const [y, m, dd] = s.split('-').map(Number); return Math.round(Date.UTC(y, m - 1, dd) / DAY); };
+const P = n => { const t = new Date(n * DAY); return { y: t.getUTCFullYear(), m: t.getUTCMonth(), d: t.getUTCDate(), js: t.getUTCDay() }; };
+const mstart = (y, m) => Math.round(Date.UTC(y, m, 1) / DAY);
+const dim = (y, m) => new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const MONL = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const WDJ = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const WDJL = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const TODAY = d('2026-11-26');
+const NOW_H = 11.6;
+const H = 34;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fd = n => { const p = P(n); return `${WDJ[p.js]} ${p.d} ${MON[p.m]}`; };
+const fdy = n => { const p = P(n); return `${p.d} ${MON[p.m]}${p.y !== 2026 ? ' ' + p.y : ''}`; };
+const orgd = (n, t) => { const p = P(n); return `<${p.y}-${String(p.m + 1).padStart(2, '0')}-${String(p.d).padStart(2, '0')} ${WDJ[p.js]}${t ? ' ' + t : ''}>`; };
+const hh = h => String(h).padStart(2, '0') + ':00';
+
+// ---------- settings ----------
+function systemWS() {
+  try { const l = new Intl.Locale(navigator.language || 'en-GB'); const wi = l.getWeekInfo ? l.getWeekInfo() : l.weekInfo; if (wi && wi.firstDay) return wi.firstDay % 7; } catch (e) {}
+  return 1;
+}
+const LTZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) { return 'UTC'; } })();
+const ZONES = ['America/Los_Angeles', 'America/New_York', 'America/Sao_Paulo', 'Europe/London', 'Europe/Berlin', 'Europe/Kyiv', 'Asia/Dubai', 'Asia/Kolkata', 'Asia/Singapore', 'Asia/Tokyo', 'Australia/Sydney', 'UTC'];
+const S = { ws: 'system', wh: [8, 20], tz: ['America/New_York', 'Asia/Tokyo'], labels: 'none' };
+const WS = () => S.ws === 'system' ? systemWS() : +S.ws;
+const wstart = n => n - ((P(n).js - WS() + 7) % 7);
+const order = () => [...Array(7)].map((_, i) => (WS() + i) % 7);
+const city = tz => tz === 'UTC' ? 'UTC' : tz.split('/').pop().replace(/_/g, ' ');
+const fmtCache = {};
+const fmt = (tz, o) => { const k = tz + JSON.stringify(o); return fmtCache[k] || (fmtCache[k] = new Intl.DateTimeFormat('en-GB', { timeZone: tz, ...o })); };
+const localMs = (n, h, m = 0) => { const p = P(n); return new Date(p.y, p.m, p.d, h, m).getTime(); };
+const hm = (tz, ms) => fmt(tz, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(ms);
+const dayIn = (tz, ms) => fmt(tz, { weekday: 'short', day: 'numeric' }).format(ms);
+const abbr = (tz, ms) => { try { return fmt(tz, { timeZoneName: 'short' }).formatToParts(ms).find(p => p.type === 'timeZoneName').value; } catch (e) { return ''; } };
+const zones = () => S.tz.filter(z => z && z !== LTZ);
+
+// ---------- data ----------
+const FILES = [
+  { id: 'blossom', name: 'blossom.org' }, { id: 'work', name: 'work.org' },
+  { id: 'home', name: 'home.org' }, { id: 'study', name: 'study.org' }];
+const fc = f => `var(--f-${f})`;
+const fname = f => FILES.find(x => x.id === f).name;
+const DAYS = [
+  ['Team retro', 'work', '2026-11-20', '15:00', 'event', 0, 'What went well this sprint and what to change.'],
+  ['Write fuzzing notes', 'blossom', '2026-11-18', '', 'scheduled', 1, 'Summarise the Valgrind replay for the README.'],
+  ['Stand-up with NY team', 'work', '2026-11-23', '15:00', 'event', 0, 'Daily, 30 minutes.'],
+  ['Sprint planning', 'work', '2026-11-23', '09:30', 'event', 0, 'Pick the stories for the next two weeks.'],
+  ['Reply to Anna about the trip', 'home', '2026-11-24', '', 'scheduled', 0, 'Dates and budget for the December trip.'],
+  ['Tokyo sync', 'work', '2026-11-24', '08:00', 'event', 0, 'Early, so it is still afternoon in Tokyo.'],
+  ['Submit expenses', 'work', '2026-11-25', '', 'deadline', 0, 'November receipts, scanned.'],
+  ['Stand-up with NY team', 'work', '2026-11-25', '15:00', 'event', 0, 'Daily, 30 minutes.'],
+  ['Yoga', 'home', '2026-11-25', '18:30', 'event', 0, 'Studio on Lime Street.'],
+  ['Design review', 'work', '2026-11-26', '10:00', 'event', 0, 'Walk through the agenda sketches with the team.'],
+  ['Pay rent', 'home', '2026-11-26', '', 'deadline', 0, 'Transfer before 18:00.'],
+  ['Lunch with Tom', 'home', '2026-11-26', '13:00', 'event', 0, 'The noodle place near the station.'],
+  ['Release call', 'work', '2026-11-26', '21:00', 'event', 0, 'Late, for the West Coast.'],
+  ['Dentist', 'home', '2026-11-27', '14:00', 'event', 0, 'Dr. Novak, room 3. Bring the X-ray.'],
+  ['Groceries', 'home', '2026-11-28', '', 'scheduled', 0, 'Milk, eggs, coffee, apples.'],
+  ['Release 0.3.0', 'blossom', '2026-11-30', '', 'deadline', 0, 'Tag v0.3.0 and check the draft release.'],
+  ['1:1 with Maria', 'work', '2026-12-02', '16:00', 'event', 0, 'Career plan, feedback on the report.'],
+  ['Read chapter 4', 'study', '2026-12-03', '', 'scheduled', 0, 'Eigenvalues and eigenvectors.'],
+  ['Client call: Acme', 'work', '2026-12-08', '11:00', 'event', 0, 'Quote for the support contract.'],
+  ['Code freeze', 'blossom', '2026-12-10', '', 'deadline', 0, 'Only fixes after this.'],
+  ["Mom's birthday", 'home', '2026-12-12', '', 'event', 0, 'Call in the morning; flowers are ordered.'],
+  ['Exam: linear algebra', 'study', '2026-12-15', '09:00', 'event', 0, 'Room B204, bring a calculator.'],
+  ['Office party', 'work', '2026-12-18', '17:00', 'event', 0, 'Secret Santa, 15 euro limit.'],
+  ['Q1 planning', 'work', '2027-01-07', '10:00', 'event', 0, 'Set the Q1 goals.'],
+  ['Renew passport', 'home', '2027-01-20', '', 'deadline', 0, 'Photos first.'],
+  ['Book flights', 'home', '2026-03-11', '', 'scheduled', 1, 'Summer vacation flights.'],
+  ['Tax return', 'home', '2026-04-30', '', 'deadline', 1, 'Filed online.'],
+  ['Team offsite', 'work', '2026-05-19', '', 'event', 0, 'Lake house, two days.'],
+  ["Dad's birthday", 'home', '2026-06-08', '', 'event', 0, 'Dinner at home.'],
+  ['Conference talk', 'work', '2026-09-16', '14:00', 'event', 0, 'Plain-text notes that last.'],
+  ['Q3 review', 'work', '2026-10-02', '10:00', 'event', 0, 'Numbers and plans for Q4.'],
+  ['Car service', 'home', '2026-10-13', '09:00', 'event', 0, 'Winter tyres too.'],
+  ['Study group', 'study', '2026-10-21', '18:00', 'event', 0, 'Problem set 5.'],
+  ['Blossom 0.1.0', 'blossom', '2026-11-10', '', 'deadline', 1, 'First public release.'],
+].map(([t, f, on, at, k, done, desc]) => ({ kind: 'day', t, f, on: d(on), at, k, done: !!done, desc }));
+const SPANS = [
+  ['Q4 goal: Blossom 1.0 beta', 'blossom', '2026-10-01', '2026-12-31', 'plan', [3, 8], 0, 'Agenda, settings, packaging; beta to ten testers.'],
+  ['Q4 goal: cut support tickets 20%', 'work', '2026-10-01', '2026-12-31', 'plan', [1, 3], 0, 'Docs, onboarding emails, a status page.'],
+  ['Agenda redesign', 'blossom', '2026-11-23', '2026-12-11', 'plan', [2, 9], 0, 'Sketch options, pick one, build the views.'],
+  ['Q4 report', 'work', '2026-11-16', '2026-11-28', 'plan', [4, 5], 0, 'Numbers from finance, then the summary.'],
+  ['Kitchen renovation', 'home', '2026-11-09', '2026-12-20', 'range', null, 0, 'Tiles on Dec 1, worktop on Dec 10.'],
+  ['Linear algebra course', 'study', '2026-10-05', '2026-12-15', 'plan', [9, 12], 0, 'Weekly lectures and problem sets.'],
+  ['Flathub packaging', 'blossom', '2026-12-01', '2026-12-19', 'plan', [0, 6], 0, 'Manifest, screenshots, review.'],
+  ['Holiday trip', 'home', '2026-12-22', '2027-01-04', 'range', null, 0, 'Vienna and Prague.'],
+  ['Migrate CI runners', 'work', '2026-11-10', '2026-11-24', 'plan', [3, 5], 0, 'Move all builds to the new runners.'],
+  ['Q1 goal: hire two developers', 'work', '2027-01-04', '2027-03-31', 'plan', [0, 2], 0, 'One backend, one frontend.'],
+  ['Summer vacation', 'home', '2026-07-06', '2026-07-24', 'range', null, 1, 'Portugal.'],
+  ['Semantic search', 'blossom', '2026-10-26', '2026-11-21', 'plan', [7, 7], 1, 'Built-in model and server backend.'],
+  ['Hiring: backend developer', 'work', '2026-09-01', '2026-10-30', 'plan', [4, 4], 1, 'Two rounds of interviews.'],
+  ['Q3 goal: semantic search', 'blossom', '2026-07-01', '2026-09-30', 'plan', [5, 5], 1, 'Shipped in October instead.'],
+].map(([t, f, a, b, k, prog, done, desc]) => ({ kind: 'span', t, f, from: d(a), to: d(b), k, prog, done: !!done || (prog && prog[0] === prog[1]), desc }));
+const ALL = [...DAYS, ...SPANS];
+ALL.forEach((x, i) => x.id = i);
+
+const late = s => !s.done && s.to < TODAY;
+const pct = s => s.prog ? s.prog[0] / s.prog[1] : null;
+const elapsed = s => Math.max(0, Math.min(1, (TODAY - s.from + 1) / (s.to - s.from + 1)));
+function status(s) {
+  if (s.done) return ['done', 'Done'];
+  if (late(s)) return ['late', `${TODAY - s.to} days late`];
+  if (s.from > TODAY) return ['soon', `Starts ${fdy(s.from)}`];
+  const p = pct(s);
+  if (p === null) return ['ok', `${s.to - TODAY} days left`];
+  return p + 0.08 >= elapsed(s) ? ['ok', 'On track'] : ['behind', 'Behind'];
+}
+const isOverdueDay = x => !x.done && x.on < TODAY && x.k !== 'event';
+
+// ---------- item hover card ----------
+const tip = document.getElementById('tip');
+function tipHtml(x) {
+  let h = `<div class="t"><span class="dot" style="--c:${fc(x.f)}"></span>${esc(x.t)}</div>`;
+  if (x.kind === 'day') {
+    const w = x.k === 'deadline' ? `Due ${fd(x.on)}` : x.k === 'scheduled' ? `Planned for ${fd(x.on)}` : `${fd(x.on)}${x.at ? ', ' + x.at : ''}`;
+    h += `<div class="w">${w} · ${fname(x.f)}${x.done ? ' · done' : ''}${isOverdueDay(x) ? ' · <span style="color:var(--danger)">overdue</span>' : ''}</div>`;
+    if (x.at && zones().length) {
+      const [a, b] = x.at.split(':').map(Number), ms = localMs(x.on, a, b);
+      h += `<div class="zones">${zones().map(z => { const sameDay = dayIn(z, ms) === dayIn(LTZ, ms); return `<span>${city(z)} <b>${hm(z, ms)}</b>${sameDay ? '' : ' ' + dayIn(z, ms)}</span>`; }).join('')}</div>`;
+    }
+    h += `<div>${esc(x.desc)}</div>`;
+    const src = x.k === 'event' ? orgd(x.on, x.at) : `${x.k.toUpperCase()}: ${orgd(x.on, x.at)}`;
+    h += `<div class="org">${esc(src)}</div>`;
+  } else {
+    const [cls, txt] = status(x);
+    h += `<div class="w">${fdy(x.from)} → ${fdy(x.to)} · ${x.to - x.from + 1} days · ${fname(x.f)}</div>`;
+    h += `<div class="row"><span class="pill ${cls}">${txt}</span>${x.prog ? `<span class="w">${x.prog[0]} of ${x.prog[1]} done</span>` : ''}</div>`;
+    h += `<div>${esc(x.desc)}</div>`;
+    const src = x.k === 'range' ? `${orgd(x.from)}--${orgd(x.to)}` : `SCHEDULED: ${orgd(x.from)} DEADLINE: ${orgd(x.to)}`;
+    h += `<div class="org">${esc(src)}</div>`;
+  }
+  return h;
+}
+function place(box, r) {
+  const tw = box.offsetWidth, th = box.offsetHeight;
+  box.style.left = Math.min(Math.max(8, r.left), innerWidth - tw - 8) + 'px';
+  let top = r.bottom + 8; if (top + th > innerHeight - 8) top = Math.max(8, r.top - th - 8);
+  box.style.top = top + 'px';
+}
+function showTip(el) { const x = ALL[+el.dataset.id]; if (!x) return; tip.innerHTML = tipHtml(x); tip.hidden = false; place(tip, el.getBoundingClientRect()); }
+
+// ---------- top bar hints (delayed) ----------
+const hint = document.getElementById('hint');
+let hintTimer = 0, hintFor = null;
+function armHint(el) {
+  if (hintFor === el) return;
+  clearTimeout(hintTimer); hint.hidden = true; hintFor = el;
+  if (!el || S.labels !== 'none') return;
+  hintTimer = setTimeout(() => { hint.innerHTML = el.dataset.tip; hint.hidden = false; place(hint, el.getBoundingClientRect()); }, 1000);
+}
+const onOver = e => {
+  const el = e.target.closest('[data-id]'); el ? showTip(el) : (tip.hidden = true);
+  armHint(e.target.closest('[data-tip]'));
+};
+document.addEventListener('pointerover', onOver);
+document.addEventListener('focusin', onOver);
+document.addEventListener('pointerdown', () => { clearTimeout(hintTimer); hint.hidden = true; });
+document.addEventListener('scroll', () => { tip.hidden = true; hint.hidden = true; }, { passive: true, capture: true });
+
+const icon = {
+  side: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 2.5v11"/></svg>',
+  search: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="13" height="13"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>',
+  agenda: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="2.5" width="13" height="12" rx="2"/><path d="M1.5 6.5h13M5 1v3M11 1v3"/></svg>',
+  capture: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg>',
+  settings: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>',
+  chev: '<svg class="chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6l4 4 4-4"/></svg>',
+};
+const tbtn = (k, lab, tipTxt, on) => `<button class="tb${on ? ' on' : ''}" data-act="tb" data-k="${k}" data-tip="${esc(tipTxt)}" aria-label="${lab}">${icon[k]}<span class="lab">${lab}</span></button>`;
+const appbar = () => `<div class="appbar lab-${S.labels}">
+  ${tbtn('side', 'Files', 'Show or hide the file list')}
+  <div class="search" data-tip="Search all notes &lt;kbd&gt;Ctrl+Shift+F&lt;/kbd&gt;">${icon.search}Search notes</div><span style="flex:1"></span>
+  ${tbtn('agenda', 'Agenda', 'Agenda: what is planned, due and ongoing <kbd>Ctrl+Shift+A</kbd>', true)}
+  ${tbtn('capture', 'Capture', 'Capture a new note or task <kbd>Ctrl+Shift+N</kbd>')}
+  ${tbtn('settings', 'Settings', 'Settings: appearance, fonts, notes folder, agenda, search model')}</div>`;
+
+// ---------- view state ----------
+const st = { view: 'week', anchor: TODAY, files: new Set(FILES.map(f => f.id)), menu: false, tlOpen: true, scroll: null };
+const VIEWS = ['week', 'month', 'quarter', 'year'];
+function range() {
+  const p = P(st.anchor);
+  if (st.view === 'week') { const a = wstart(st.anchor); return [a, a + 6]; }
+  if (st.view === 'month') return [mstart(p.y, p.m), mstart(p.y, p.m) + dim(p.y, p.m) - 1];
+  if (st.view === 'quarter') { const q = Math.floor(p.m / 3) * 3; return [mstart(p.y, q), mstart(p.y, q + 3) - 1]; }
+  return [mstart(p.y, 0), mstart(p.y + 1, 0) - 1];
+}
+function rangeTitle() {
+  const [a, b] = range(), pa = P(a), pb = P(b);
+  if (st.view === 'year') return String(pa.y);
+  if (st.view === 'quarter') return `Q${pa.m / 3 + 1} ${pa.y} · ${MON[pa.m]} – ${MON[pb.m]}`;
+  if (st.view === 'month') return `${MONL[pa.m]} ${pa.y}`;
+  return pa.m === pb.m ? `${pa.d} – ${pb.d} ${MON[pa.m]} ${pa.y}` : `${pa.d} ${MON[pa.m]} – ${pb.d} ${MON[pb.m]} ${pb.y}`;
+}
+const vis = x => st.files.has(x.f);
+const dayItems = n => DAYS.filter(vis).filter(x => x.on === n).sort((a, b) => (a.at || '00') < (b.at || '00') ? -1 : 1);
+const spansIn = (a, b) => SPANS.filter(vis).filter(s => s.to >= a && s.from <= b);
+
+function toolbar() {
+  const filesLbl = st.files.size === FILES.length ? 'All files' : st.files.size === 0 ? 'No files' : `${st.files.size} of ${FILES.length} files`;
+  let h = `<div class="toolbar">
+    <button class="btn" data-act="prev" aria-label="Previous">‹</button>
+    <button class="btn" data-act="today">Today</button>
+    <button class="btn" data-act="next" aria-label="Next">›</button>
+    <span class="title">${rangeTitle()}</span><span style="flex:1"></span>
+    <div class="seg" role="group" aria-label="View">${VIEWS.map(v => `<button data-act="view" data-v="${v}" class="${st.view === v ? 'on' : ''}" aria-pressed="${st.view === v}">${v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div>
+    <button class="btn" data-act="menu" aria-expanded="${st.menu}">${filesLbl} ▾</button>`;
+  if (st.menu) {
+    h += `<div class="menu"><label><input type="checkbox" id="f-all" data-act="all" ${st.files.size === FILES.length ? 'checked' : ''}> All files</label><hr>`;
+    h += FILES.map(f => `<label><input type="checkbox" id="f-${f.id}" data-act="file" data-f="${f.id}" ${st.files.has(f.id) ? 'checked' : ''}><span class="dot" style="--c:${fc(f.id)}"></span>${f.name}</label>`).join('');
+    h += `</div>`;
+  }
+  return h + `</div>`;
+}
+
+function mini(y, m, opts = {}) {
+  const first = mstart(y, m), start = wstart(first), n = dim(y, m);
+  const weeks = Math.ceil((first - start + n) / 7);
+  const [a, b] = opts.noView ? [1, 0] : range();
+  let h = `<table class="mini"><caption>${opts.cap || MONL[m]}</caption><thead><tr>${order().map(j => `<th>${WDJ[j][0]}</th>`).join('')}</tr></thead><tbody>`;
+  for (let w = 0; w < weeks; w++) {
+    h += '<tr>';
+    for (let i = 0; i < 7; i++) {
+      const day = start + w * 7 + i, p = P(day), out = p.m !== m;
+      if (out && opts.hideOut) { h += '<td></td>'; continue; }
+      const items = out ? [] : dayItems(day);
+      const files = [...new Set(items.map(x => x.f))].slice(0, 3);
+      const cls = [out && 'out', day === TODAY && 'today', !out && day >= a && day <= b && 'inview'].filter(Boolean).join(' ');
+      const lab = `${fd(day)}${items.length ? `, ${items.length} item${items.length > 1 ? 's' : ''}` : ''}`;
+      h += `<td class="${cls}"><button data-act="goto" data-n="${day}" aria-label="${lab}">${p.d}${files.length ? `<span class="ds">${files.map(f => `<i style="--c:${fc(f)}"></i>`).join('')}</span>` : ''}</button></td>`;
+    }
+    h += '</tr>';
+  }
+  return h + '</tbody></table>';
+}
+function strip3() {
+  const p = P(st.anchor);
+  return `<div class="strip">${[-1, 0, 1].map(k => { const t = new Date(Date.UTC(p.y, p.m + k, 1)); return mini(t.getUTCFullYear(), t.getUTCMonth(), { cap: `${MONL[t.getUTCMonth()]} ${t.getUTCFullYear()}` }); }).join('')}</div>`;
+}
+function barHtml(x, a, b, style, extra = '') {
+  const cl = x.from < a, cr = x.to > b, p = pct(x);
+  const cls = ['bar', late(x) && 'late', x.done && 'done', cl && 'cl', cr && 'cr'].filter(Boolean).join(' ');
+  return `<div class="${cls}" tabindex="0" data-id="${x.id}" style="--c:${fc(x.f)};${style}">${p !== null ? `<i style="width:${p * 100}%"></i>` : ''}<span>${cl ? '‹ ' : ''}${esc(x.t)}</span>${extra}</div>`;
+}
+const chip = x => `<div class="chip${x.done ? ' done' : ''}" tabindex="0" data-id="${x.id}" style="--c:${fc(x.f)}"><b></b>${x.at ? `<time>${x.at}</time>` : ''}${x.k === 'deadline' ? '<em>due</em>' : ''}<span>${esc(x.t)}</span></div>`;
+
+// ---------- calendar ----------
+function calWeek() {
+  const [a] = range(), zs = zones(), gut = `repeat(${zs.length + 1}, 54px)`;
+  const ref = a + 3, [w0, w1] = S.wh;
+  const style = `--gut:${gut};--H:${H}px`;
+  let h = `<div class="wk" style="${style}">`;
+  for (const z of zs) h += `<div class="zh"><b>${esc(city(z))}</b>${abbr(z, localMs(ref, 12))}</div>`;
+  h += `<div class="zh loc"><b>${zs.length ? 'Here' : ''}</b>${zs.length ? abbr(LTZ, localMs(ref, 12)) : ''}</div>`;
+  h += order().map((j, i) => `<div class="dh${a + i === TODAY ? ' today' : ''}">${WDJ[j]}<b>${P(a + i).d}</b></div>`).join('') + `</div>`;
+  const untimed = [...Array(7)].map((_, i) => dayItems(a + i).filter(x => !x.at));
+  if (untimed.some(u => u.length)) {
+    h += `<div class="allday" style="${style}"><div class="lbl" style="grid-column:1/${zs.length + 2}">Due &amp; planned</div>`;
+    untimed.forEach((u, i) => { h += `<div class="cell" style="grid-column:${i + zs.length + 2};grid-row:1">${u.map(chip).join('')}</div>`; });
+    h += `</div>`;
+  }
+  h += `<div class="tscroll" style="max-height:${13 * H}px"><div class="tgrid" style="${style}">`;
+  for (const z of zs) {
+    h += `<div class="hrs alt">${[...Array(24)].map((_, i) => {
+      if (!i) return '<div></div>';
+      const ms = localMs(ref, i), prev = localMs(ref, i - 1);
+      const dayChange = dayIn(z, ms) !== dayIn(z, prev);
+      return `<div>${hm(z, ms)}${dayChange ? `<small>${dayIn(z, ms)}</small>` : ''}</div>`;
+    }).join('')}</div>`;
+  }
+  h += `<div class="hrs loc">${[...Array(24)].map((_, i) => `<div class="${i >= w0 && i < w1 ? 'work' : ''}">${i ? hh(i) : ''}</div>`).join('')}</div>`;
+  order().forEach((j, i) => {
+    const day = a + i, wkend = j === 0 || j === 6;
+    h += `<div class="col${day === TODAY ? ' today' : ''}${wkend ? ' wkend' : ''}" style="height:${24 * H}px"><div class="wh" style="top:${w0 * H}px;height:${(w1 - w0) * H}px"></div><div class="lines"></div>`;
+    for (const x of dayItems(day).filter(x => x.at)) {
+      const [hr, mn] = x.at.split(':').map(Number), top = (hr + mn / 60) * H;
+      h += `<div class="ev${x.done ? ' done' : ''}" tabindex="0" data-id="${x.id}" style="--c:${fc(x.f)};top:${top}px;height:${H - 3}px"><b>${esc(x.t)}</b><time>${x.at}</time></div>`;
+    }
+    if (day === TODAY) h += `<div class="now" style="top:${NOW_H * H}px"></div>`;
+    h += `</div>`;
+  });
+  return h + `</div></div>`;
+}
+function calMonth() {
+  const p = P(st.anchor), first = mstart(p.y, p.m), start = wstart(first), n = dim(p.y, p.m);
+  const weeks = Math.ceil((first - start + n) / 7);
+  let h = `<div class="mh">${order().map(j => `<div>${WDJ[j]}</div>`).join('')}</div>`;
+  for (let w = 0; w < weeks; w++) {
+    const a = start + w * 7;
+    h += `<div class="mw" style="grid-template-rows:auto auto">`;
+    for (let i = 0; i < 7; i++) { const j = P(a + i).js; h += `<div class="bg${j === 0 || j === 6 ? ' wkend' : ''}${a + i === TODAY ? ' today' : ''}" style="grid-column:${i + 1};grid-row:1/3"></div>`; }
+    for (let i = 0; i < 7; i++) { const dd = P(a + i); h += `<div class="num${dd.m !== p.m ? ' out' : ''}${a + i === TODAY ? ' today' : ''}" style="grid-column:${i + 1};grid-row:1"><span>${dd.d}</span></div>`; }
+    for (let i = 0; i < 7; i++) {
+      const its = dayItems(a + i), max = 3;
+      h += `<div class="cell" style="grid-column:${i + 1};grid-row:2">${its.slice(0, max).map(chip).join('')}${its.length > max ? `<div class="more">+${its.length - max} more</div>` : ''}</div>`;
+    }
+    h += `</div>`;
+  }
+  return h;
+}
+function calMonths() {
+  const [a, b] = range(), pa = P(a), pb = P(b), out = [];
+  for (let m = pa.m; m <= pb.m; m++) out.push(mini(pa.y, m, { hideOut: true, noView: true }));
+  return `<div class="yr${st.view === 'quarter' ? ' q' : ''}">${out.join('')}</div>`;
+}
+const cal = () => st.view === 'week' ? calWeek() : st.view === 'month' ? calMonth() : calMonths();
+
+// ---------- timeline ----------
+function timeline() {
+  const [a, b] = range(), len = b - a + 1, L = n => ((n - a) / len * 100);
+  const spans = spansIn(a, b).sort((x, y) => x.from - y.from || x.to - y.to);
+  const counts = { ongoing: spans.filter(s => !s.done && s.from <= TODAY && s.to >= TODAY).length, behind: spans.filter(s => status(s)[0] === 'behind').length, late: spans.filter(late).length };
+  const sum = `<span class="sum">${counts.ongoing ? `<span class="pill soon">${counts.ongoing} ongoing</span>` : ''}${counts.behind ? `<span class="pill behind">${counts.behind} behind</span>` : ''}${counts.late ? `<span class="pill late">${counts.late} late</span>` : ''}</span>`;
+  let h = `<div class="tl"><button class="tl-toggle" data-act="tl" aria-expanded="${st.tlOpen}">${icon.chev}<h4>Ongoing</h4>${st.tlOpen ? `<small>${spans.length} in this ${st.view} · fill shows done, the line is today</small>` : sum}</button>`;
+  if (!st.tlOpen) return h + `</div>`;
+  h += `<div class="tl-body">`;
+  if (!spans.length) return h + `<div class="empty">Nothing ongoing in this ${st.view}.</div></div></div>`;
+  let scale = '', cols = '';
+  if (st.view === 'year' || st.view === 'quarter') {
+    const pa = P(a), pb = P(b);
+    for (let m = pa.m; m <= pb.m; m++) {
+      const s = mstart(pa.y, m), q = m % 3 === 0;
+      scale += `<span class="l${st.view === 'year' && q ? ' q' : ''}" style="left:${L(s)}%">${st.view === 'year' && q ? `Q${m / 3 + 1} · ` : ''}${st.view === 'quarter' ? MONL[m] : MON[m]}</span>`;
+      cols += `<i class="${q || st.view === 'quarter' ? 'strong' : ''}" style="left:${L(s)}%"></i>`;
+    }
+    if (st.view === 'quarter') for (let n = wstart(a) + 7; n <= b; n += 7) cols += `<i style="left:${L(n)}%"></i>`;
+  } else {
+    for (let n = a; n <= b; n++) {
+      const p = P(n), lab = st.view === 'week' ? `${WDJ[p.js]} ${p.d}` : p.d;
+      scale += `<span class="${n === TODAY ? 'today' : ''}" style="left:${L(n + 0.5)}%">${lab}</span>`;
+      cols += p.js === 0 || p.js === 6 ? `<i class="wkend" style="left:${L(n)}%;width:${100 / len}%"></i>` : `<i style="left:${L(n)}%"></i>`;
+    }
+  }
+  const todayIn = TODAY >= a && TODAY <= b;
+  const coarse = st.view === 'year' || st.view === 'quarter';
+  const todayLine = todayIn ? `<div class="tl-today" style="left:${L(TODAY + (coarse ? 0 : 0.5))}%"></div>` : '';
+  h += `<div class="tl-grid"><div></div><div class="tl-scale">${scale}</div>`;
+  for (const f of FILES) {
+    const fs = spans.filter(s => s.f === f.id); if (!fs.length) continue;
+    h += `<div class="tl-group"><span class="dot" style="--c:${fc(f.id)}"></span>${f.name}</div>`;
+    for (const s of fs) {
+      const [, txt] = status(s);
+      const s0 = Math.max(s.from, a), s1 = Math.min(s.to, b);
+      const left = L(s0), width = (s1 - s0 + 1) / len * 100;
+      const meta = s.prog ? `${s.prog[0]}/${s.prog[1]} · ${txt}` : txt;
+      h += `<div class="tl-name"><span>${esc(s.t)}</span><small style="${late(s) ? 'color:var(--danger)' : ''}">${meta}</small></div>`;
+      h += `<div class="tl-track"><div class="tl-cols">${cols}</div>${todayLine}`;
+      const ends = !s.done && s.to >= TODAY ? `<small>ends ${fdy(s.to)}</small>` : '';
+      h += barHtml(s, a, b, `left:${left}%;width:${width}%`, width > 26 ? ends : '');
+      if (s.k === 'plan' && s.to <= b && !s.done) h += `<div class="flag" style="--c:${fc(s.f)};left:calc(${L(s.to + 1)}% - 1px)" aria-hidden="true"></div>`;
+      if (late(s) && todayIn) {
+        const l0 = L(Math.max(s.to + 1, a)), l1 = L(TODAY + (coarse ? 0 : 0.5));
+        h += `<div class="tl-late" style="left:${l0}%;width:${Math.max(l1 - l0, 0.5)}%"><b>${TODAY - s.to} days late</b></div>`;
+      }
+      h += `</div>`;
+    }
+  }
+  return h + `</div></div></div>`;
+}
+
+// ---------- mount ----------
+const el = document.getElementById('frame');
+function render() {
+  const strip = st.view === 'week' || st.view === 'month' ? strip3() : '';
+  el.innerHTML = appbar() + toolbar() + strip + timeline() + `<div class="sub">Calendar <small>· one-day items</small></div>` + cal();
+  const sc = el.querySelector('.tscroll');
+  if (sc) { sc.scrollTop = st.scroll ?? Math.max(0, (S.wh[0] - 0.5) * H); sc.addEventListener('scroll', () => { st.scroll = sc.scrollTop; }, { passive: true }); }
+}
+el.addEventListener('click', e => {
+  const t = e.target.closest('[data-act]');
+  if (!t) { if (st.menu && !e.target.closest('.menu')) { st.menu = false; render(); } return; }
+  const act = t.dataset.act, p = P(st.anchor);
+  const step = { week: 0, month: 1, quarter: 3, year: 12 }[st.view];
+  if (act === 'prev' || act === 'next') {
+    const k = act === 'prev' ? -1 : 1;
+    st.anchor = st.view === 'week' ? st.anchor + 7 * k : Math.round(Date.UTC(p.y, p.m + step * k, 1) / DAY);
+  } else if (act === 'today') st.anchor = TODAY;
+  else if (act === 'view') st.view = t.dataset.v;
+  else if (act === 'goto') { st.anchor = +t.dataset.n; if (st.view !== 'week' && st.view !== 'month') st.view = 'week'; }
+  else if (act === 'menu') st.menu = !st.menu;
+  else if (act === 'all') st.files = t.checked ? new Set(FILES.map(f => f.id)) : new Set();
+  else if (act === 'file') { t.checked ? st.files.add(t.dataset.f) : st.files.delete(t.dataset.f); }
+  else if (act === 'tl') st.tlOpen = !st.tlOpen;
+  else if (act === 'tb') { if (t.dataset.k === 'settings') document.getElementById('settings').scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  else return;
+  tip.hidden = true;
+  render();
+});
+el.addEventListener('keydown', e => { if (e.key === 'Escape' && st.menu) { st.menu = false; render(); } });
+
+// ---------- settings card ----------
+const $ = id => document.getElementById(id);
+const hours = (sel, from, to, v) => { sel.innerHTML = [...Array(to - from + 1)].map((_, i) => `<option value="${from + i}" ${from + i === v ? 'selected' : ''}>${hh(from + i)}</option>`).join(''); };
+hours($('s-wh0'), 0, 23, S.wh[0]); hours($('s-wh1'), 1, 24, S.wh[1]);
+const tzOpts = v => `<option value="">None</option>` + ZONES.map(z => `<option value="${z}" ${z === v ? 'selected' : ''}>${esc(city(z))}${z === 'UTC' ? '' : ' · ' + esc(abbr(z, Date.now()))}</option>`).join('');
+$('s-tz0').innerHTML = tzOpts(S.tz[0]); $('s-tz1').innerHTML = tzOpts(S.tz[1]);
+function notes() {
+  $('s-ws-note').textContent = S.ws === 'system' ? `Your system starts weeks on ${WDJL[systemWS()]}.` : '';
+  $('s-tz-note').textContent = `Yours: ${city(LTZ)}. Choose None to hide a column.`;
+}
+notes();
+$('s-ws').addEventListener('change', e => { S.ws = e.target.value; notes(); render(); });
+$('s-wh0').addEventListener('change', e => { S.wh[0] = +e.target.value; if (S.wh[1] <= S.wh[0]) { S.wh[1] = S.wh[0] + 1; hours($('s-wh1'), 1, 24, S.wh[1]); } st.scroll = null; render(); });
+$('s-wh1').addEventListener('change', e => { S.wh[1] = +e.target.value; if (S.wh[1] <= S.wh[0]) { S.wh[0] = S.wh[1] - 1; hours($('s-wh0'), 0, 23, S.wh[0]); } st.scroll = null; render(); });
+$('s-tz0').addEventListener('change', e => { S.tz[0] = e.target.value; render(); });
+$('s-tz1').addEventListener('change', e => { S.tz[1] = e.target.value; render(); });
+$('s-lab').addEventListener('change', e => { S.labels = e.target.value; armHint(null); render(); });
+render();
+})();
+</script>
