@@ -45,6 +45,11 @@ pub struct NoteRecord {
     pub modified: u64,
     /// Title and body, for plain-text terms.
     pub text: String,
+    /// Progress as (done, total): the title's `[n/m]` or `[n%]` (as n of
+    /// 100), else the body's checkboxes, else the child headings' TODO
+    /// keywords; `None` with none of them.
+    #[serde(default)]
+    pub progress: Option<(u32, u32)>,
 }
 
 /// Records for every heading of `doc`.
@@ -80,9 +85,65 @@ pub fn records(path: &str, doc: &Document, keywords: &Keywords, modified: u64) -
                 custom_id: h.property("CUSTOM_ID").map(String::from),
                 modified,
                 text: format!("{}\n{}", h.title, doc.body_text(h.index)),
+                progress: progress(doc, h.index, keywords),
             }
         })
         .collect()
+}
+
+/// A progress cookie in `title`: `[3/8]` is (3, 8), `[40%]` is (40, 100).
+#[must_use]
+pub fn cookie(title: &str) -> Option<(u32, u32)> {
+    title.match_indices('[').find_map(|(i, _)| {
+        let rest = &title[i + 1..];
+        let inner = &rest[..rest.find(']')?];
+        if let Some(pct) = inner.strip_suffix('%') {
+            let n: u32 = pct.parse().ok()?;
+            return Some((n.min(100), 100));
+        }
+        let (a, b) = inner.split_once('/')?;
+        let (a, b): (u32, u32) = (a.parse().ok()?, b.parse().ok()?);
+        Some((a.min(b), b))
+    })
+}
+
+/// Heading `index`'s progress: its cookie, else its body's checkboxes,
+/// else its child headings' TODO keywords.
+fn progress(doc: &Document, index: usize, keywords: &Keywords) -> Option<(u32, u32)> {
+    let h = &doc.headings()[index];
+    if let Some(p) = cookie(&h.title) {
+        return Some(p);
+    }
+    let (mut done, mut total) = (0u32, 0u32);
+    for line in doc.body_text(index).lines() {
+        let t = line.trim_start();
+        let item = t
+            .strip_prefix("- ")
+            .or_else(|| t.strip_prefix("+ "))
+            .or_else(|| {
+                let digits = t.find(|c: char| !c.is_ascii_digit()).filter(|&n| n > 0)?;
+                t[digits..]
+                    .strip_prefix(". ")
+                    .or_else(|| t[digits..].strip_prefix(") "))
+            });
+        let Some(item) = item else { continue };
+        if item.starts_with("[ ]") || item.starts_with("[-]") {
+            total += 1;
+        } else if item.starts_with("[X]") || item.starts_with("[x]") {
+            total += 1;
+            done += 1;
+        }
+    }
+    if total > 0 {
+        return Some((done, total));
+    }
+    for c in doc.children(index) {
+        if let Some(k) = &doc.headings()[c].keyword {
+            total += 1;
+            done += u32::from(keywords.is_done(k));
+        }
+    }
+    (total > 0).then_some((done, total))
 }
 
 impl NoteRecord {
@@ -132,6 +193,7 @@ pub fn intro_record(path: &str, doc: &Document, modified: u64) -> Option<NoteRec
         id: pre.file_id().map(String::from),
         custom_id: None,
         modified,
+        progress: None,
     })
 }
 
@@ -171,5 +233,46 @@ impl From<NoteRecord> for Note {
                 .collect(),
             record,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn progress_of(text: &str) -> Vec<Option<(u32, u32)>> {
+        let doc = Document::parse(text, Keywords::default());
+        records("a.org", &doc, &Keywords::default(), 0)
+            .into_iter()
+            .map(|r| r.progress)
+            .collect()
+    }
+
+    #[test]
+    fn cookies() {
+        assert_eq!(cookie("Beta [3/8]"), Some((3, 8)));
+        assert_eq!(cookie("Beta [40%]"), Some((40, 100)));
+        assert_eq!(cookie("[a] then [1/2]"), Some((1, 2)));
+        assert_eq!(cookie("Beta [x]"), None);
+        assert_eq!(cookie("Beta [9/3]"), Some((3, 3)));
+    }
+
+    #[test]
+    fn progress_from_cookie_then_checkboxes_then_children() {
+        let text = "* A [1/4]\n- [X] one\n* B\n- [X] one\n- [ ] two\n1. [x] three\n\
+                    * C\n** TODO c1\n** DONE c2\n** plain\n* D\nnothing\n";
+        // A, B, C, then c1, c2 and plain (none of their own), then D.
+        assert_eq!(
+            progress_of(text),
+            [
+                Some((1, 4)),
+                Some((2, 3)),
+                Some((1, 2)),
+                None,
+                None,
+                None,
+                None
+            ]
+        );
     }
 }

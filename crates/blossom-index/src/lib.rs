@@ -8,6 +8,7 @@
 //! with or without narrowing.
 
 pub mod agenda;
+pub mod calendar;
 pub mod matcher;
 pub mod query;
 mod record;

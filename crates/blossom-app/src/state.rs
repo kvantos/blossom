@@ -1,5 +1,5 @@
 //! What the app remembers between runs that isn't a setting: the file last
-//! open in each notes folder. Kept in `state.toml` in the platform data
+//! open in each notes folder, and how the agenda was last shown. Kept in `state.toml` in the platform data
 //! folder; losing it only means starting on the inbox again.
 
 use std::collections::BTreeMap;
@@ -15,6 +15,10 @@ use crate::tree::FileInfo;
 pub struct State {
     /// Notes folder (as an absolute path) → the vault-relative file last open.
     pub last_file: BTreeMap<String, String>,
+    /// The agenda's last scope: week, month, quarter or year.
+    pub agenda_scope: crate::agenda::Scope,
+    /// The agenda's timeline was closed.
+    pub timeline_closed: bool,
 }
 
 /// `state.toml` in the platform data folder.

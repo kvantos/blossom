@@ -115,6 +115,15 @@ model = "multilingual"        # about 100 languages (488 MB)
 # api_key_env = "OPENAI_API_KEY"   # the variable that holds the key, if one is needed
 ```
 
+### Agenda
+
+**Agenda** in the top bar shows a week (an hour grid), a month, a quarter or
+a year. Above the calendar, **Ongoing** lists headings with both SCHEDULED
+and DEADLINE, or a date range like `<2026-11-09 Mon>--<2026-12-20 Sun>`, as
+bars filled to their progress (`[3/8]`, checkboxes or child TODOs). Hover an
+item for its details; click it to open it. Week start, working hours and up
+to two extra time zones are under **Settings → Agenda**.
+
 ### Settings
 
 Every setting is in `~/.config/blossom/config.toml`. Blossom creates it the

@@ -39,6 +39,21 @@ pub struct Config {
     pub appearance: AppearanceConfig,
     /// The app's note editor (`[editor]`).
     pub editor: EditorConfig,
+    /// The app's agenda (`[agenda]`).
+    pub agenda: AgendaConfig,
+}
+
+/// The `[agenda]` table, read by the app. The app checks the values and
+/// falls back to its defaults.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgendaConfig {
+    /// `system` (default), `monday`, `sunday` or `saturday`.
+    pub week_start: Option<String>,
+    /// Whole hours, `"08:00-20:00"` (default).
+    pub working_hours: Option<String>,
+    /// Up to two extra time zones, IANA names such as `"Asia/Tokyo"`.
+    pub time_zones: Vec<String>,
 }
 
 /// The `[editor]` table, read by the app.

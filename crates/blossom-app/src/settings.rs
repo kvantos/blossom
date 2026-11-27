@@ -12,6 +12,7 @@ use blossom_vault::config::{AppearanceConfig, Config};
 use serde::de::{DeserializeOwned, IntoDeserializer as _};
 use serde::{Deserialize, Serialize};
 
+use crate::agenda::prefs::AgendaPrefs;
 use crate::style::{Colours, ModeChoice};
 use crate::topbar::Labels;
 
@@ -43,6 +44,9 @@ pub struct Settings {
     pub top_bar_labels: Labels,
     /// Emacs keys in the editor (`[editor] emacs_keys`).
     pub emacs_keys: bool,
+    /// The agenda's settings (`[agenda]`).
+    #[serde(skip)]
+    pub agenda: AgendaPrefs,
 }
 
 impl Default for Settings {
@@ -56,6 +60,7 @@ impl Default for Settings {
             editor_size: 14,
             top_bar_labels: Labels::default(),
             emacs_keys: true,
+            agenda: AgendaPrefs::default(),
         }
     }
 }
@@ -97,8 +102,9 @@ impl Settings {
     /// `[editor]`.
     #[must_use]
     pub fn from_all(config: &Config) -> (Settings, Vec<String>) {
-        let (mut s, problems) = Settings::from_config(&config.appearance);
+        let (mut s, mut problems) = Settings::from_config(&config.appearance);
         s.emacs_keys = config.editor.emacs_keys.unwrap_or(true);
+        s.agenda = AgendaPrefs::from_config(&config.agenda, &mut problems);
         (s, problems)
     }
 
@@ -161,6 +167,7 @@ impl Settings {
                 editor_size,
                 top_bar_labels,
                 emacs_keys: d.emacs_keys,
+                agenda: d.agenda,
             },
             problems,
         )
@@ -203,6 +210,7 @@ impl Settings {
                 name(self.top_bar_labels),
             ));
         }
+        out.extend(self.agenda.changes_from(&old.agenda));
         out
     }
 }
@@ -298,6 +306,7 @@ mod tests {
                 editor_size: 16,
                 top_bar_labels: Labels::Beside,
                 emacs_keys: true,
+                agenda: AgendaPrefs::default(),
             }
         );
         assert_eq!(problems.len(), 1, "{problems:?}");
@@ -324,6 +333,11 @@ mod tests {
             editor_size: 12,
             top_bar_labels: Labels::Below,
             emacs_keys: false,
+            agenda: AgendaPrefs {
+                week_start: crate::agenda::prefs::WeekStart::Sunday,
+                work: (9, 17),
+                zones: vec![chrono_tz::Asia::Tokyo],
+            },
         };
         blossom_vault::config::edit::apply(&path, &s.changes_from(&d)).unwrap();
         let all = |path: &Path| Settings::from_all(&Config::load(path).unwrap());

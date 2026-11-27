@@ -26,7 +26,7 @@ use crate::record::{Note, NoteRecord, intro_record, records};
 
 /// Bump when the schema or the record format changes; an index with another
 /// version (or other settings) is deleted and rebuilt.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const META_FILE: &str = "blossom-index.meta";
 const GRAMS: &str = "grams3";
 const WRITER_MEMORY: usize = 50_000_000;

@@ -1,5 +1,5 @@
-//! The Settings panel: a list of sections on the left (Appearance, Notes
-//! folder, Search by meaning), the chosen one on the right. A choice applies
+//! The Settings panel: a list of sections on the left (Appearance, Editor,
+//! Agenda, Notes folder, Search by meaning), the chosen one on the right. A choice applies
 //! at once and is written to `config.toml`; typed values (a server address)
 //! apply with Enter or the Apply button, so the vault isn't reopened at every
 //! key.
@@ -7,11 +7,12 @@
 use std::sync::Arc;
 
 use iced::widget::{
-    Column, button, column, container, pick_list, radio, row, rule, scrollable, text, text_input,
-    toggler,
+    Column, button, column, combo_box, container, pick_list, radio, row, rule, scrollable, text,
+    text_input, toggler,
 };
 use iced::{Element, Fill};
 
+use crate::agenda::prefs::{self, MAX_ZONES, WeekStart};
 use crate::app::{Message, bold, dim};
 use crate::fonts::{Choice, Installed};
 use crate::meaning::Status;
@@ -28,6 +29,8 @@ pub enum Section {
     Appearance,
     /// The note editor's keys.
     Editor,
+    /// Week start, working hours, time zones.
+    Agenda,
     /// Which folder of notes to open.
     Notes,
     /// The model for search by meaning.
@@ -36,9 +39,10 @@ pub enum Section {
 
 impl Section {
     /// Every section, in the order the panel lists them.
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 5] = [
         Section::Appearance,
         Section::Editor,
+        Section::Agenda,
         Section::Notes,
         Section::Search,
     ];
@@ -47,6 +51,7 @@ impl Section {
         match self {
             Section::Appearance => "Appearance",
             Section::Editor => "Editor",
+            Section::Agenda => "Agenda",
             Section::Notes => "Notes folder",
             Section::Search => "Search by meaning",
         }
@@ -155,6 +160,16 @@ pub enum Setting {
     Labels(Labels),
     /// Emacs keys in the editor on or off.
     EmacsKeys(bool),
+    /// The first day of the week.
+    WeekStart(WeekStart),
+    /// Working hours start.
+    WorkStart(Hour),
+    /// Working hours end.
+    WorkEnd(Hour),
+    /// Add a time zone, by name.
+    AddZone(String),
+    /// Remove the Nth time zone.
+    RemoveZone(usize),
     /// How search by meaning works.
     Model(ModelChoice),
     /// The server address field.
@@ -167,8 +182,18 @@ pub enum Setting {
     Download,
 }
 
+/// An hour of the day for the working hours, shown as `08:00`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hour(pub u32);
+
+impl std::fmt::Display for Hour {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:02}:00", self.0)
+    }
+}
+
 /// The open panel.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct Panel {
     /// The section shown.
     pub section: Section,
@@ -176,6 +201,8 @@ pub struct Panel {
     pub server: String,
     /// The server's model being typed.
     pub server_model: String,
+    /// The time zone picker: every zone, filtered as you type.
+    pub zones: combo_box::State<String>,
 }
 
 /// What the Search section shows besides the panel's own fields.
@@ -228,6 +255,7 @@ pub fn view(v: View<'_>) -> Element<'_, Message> {
     let body = match v.panel.section {
         Section::Appearance => appearance(v.settings, v.installed),
         Section::Editor => editor(v.settings),
+        Section::Agenda => agenda(v.settings, &v.panel.zones),
         Section::Notes => notes(v.folder, v.config_path),
         Section::Search => search_section(v.panel, &v.search),
     };
@@ -394,6 +422,69 @@ fn editor(s: &Settings) -> Element<'_, Message> {
         );
     }
     Column::with_children(parts).spacing(10).into()
+}
+
+/// Week start, working hours and extra time zones.
+fn agenda<'a>(s: &'a Settings, zones: &'a combo_box::State<String>) -> Element<'a, Message> {
+    let a = &s.agenda;
+    let starts: Vec<Hour> = (0..24).map(Hour).collect();
+    let ends: Vec<Hour> = (1..=24).map(Hour).collect();
+    let mut parts: Vec<Element<'a, Message>> = vec![
+        heading("Week starts on"),
+        pick_list(WeekStart::ALL, Some(a.week_start), |w| {
+            send(Setting::WeekStart(w))
+        })
+        .text_size(13)
+        .into(),
+        heading("Working hours"),
+        row![
+            pick_list(starts, Some(Hour(a.work.0)), |h| send(Setting::WorkStart(
+                h
+            )))
+            .text_size(13),
+            text("to").size(13),
+            pick_list(ends, Some(Hour(a.work.1)), |h| send(Setting::WorkEnd(h))).text_size(13),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into(),
+        text("The week view opens on them and shades the other hours.")
+            .size(12)
+            .style(dim)
+            .into(),
+        heading("Other time zones"),
+    ];
+    for (i, z) in a.zones.iter().enumerate() {
+        parts.push(
+            row![
+                text(format!("{} ({})", prefs::city(*z), z.name()))
+                    .size(13)
+                    .width(Fill),
+                button(text("Remove").size(12))
+                    .on_press(send(Setting::RemoveZone(i)))
+                    .padding([2, 8])
+                    .style(button::secondary),
+            ]
+            .align_y(iced::Center)
+            .into(),
+        );
+    }
+    if a.zones.len() < MAX_ZONES {
+        parts.push(
+            combo_box(zones, "Add a time zone, e.g. Tokyo", None, |z| {
+                send(Setting::AddZone(z))
+            })
+            .size(13)
+            .into(),
+        );
+    }
+    parts.push(
+        text("Each shows as an hour column beside yours in the week view, and an item's card gives its time there too. Up to two.")
+            .size(12)
+            .style(dim)
+            .into(),
+    );
+    Column::with_children(parts).spacing(8).into()
 }
 
 /// The notes folder, and where the settings live.

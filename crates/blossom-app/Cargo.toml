@@ -23,6 +23,7 @@ blossom-index.workspace = true
 blossom-semantic.workspace = true
 blossom-vault.workspace = true
 chrono = { workspace = true, features = ["clock"] }
+chrono-tz = "0.10.4"
 fontdb.workspace = true
 iced.workspace = true
 image.workspace = true

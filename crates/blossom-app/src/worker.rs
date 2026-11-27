@@ -20,11 +20,12 @@ use std::time::{Duration, Instant};
 
 use blossom_core::capture::Target;
 use blossom_core::{Document, Keywords};
-use blossom_index::agenda::{self, Agenda};
+use blossom_index::calendar::{self, Calendar};
 use blossom_index::{MatchContext, Note, NoteIndex, Query};
 use blossom_vault::config::{SemanticConfig, Template};
 use blossom_vault::ops::{Change, Complete, HeadingRef, OpError, Outcome};
 use blossom_vault::{Revision, Vault, WriteError, config};
+use chrono::NaiveDate;
 use iced::futures::{SinkExt, StreamExt};
 use iced::{Subscription, futures};
 
@@ -157,8 +158,8 @@ pub enum Request {
     },
     /// Write every waiting save now, then answer [`Event::Flushed`].
     Flush,
-    /// Send the agenda for this many days now and after every change.
-    Agenda(u32),
+    /// Send the agenda for the days `from..=to` now and after every change.
+    Agenda(NaiveDate, NaiveDate),
     /// Send the headings matching this query now and after every change;
     /// an empty query stops that. `meaning` ranks them by meaning instead
     /// (in the background; see [`crate::meaning`]).
@@ -258,8 +259,8 @@ pub enum Event {
     Flushed,
     /// The loaded file is gone.
     Missing(String),
-    /// The agenda.
-    Agenda(Arc<Agenda>),
+    /// The agenda for the days asked for.
+    Agenda(Arc<Calendar>),
     /// Search results.
     Search(Arc<SearchResults>),
     /// How search by meaning is getting on.
@@ -415,8 +416,8 @@ struct Open {
     vault: Vault,
     index: NoteIndex,
     settings: OpenVault,
-    /// Days of agenda to send after every change, once asked for.
-    agenda: Option<u32>,
+    /// The days of agenda to send after every change, once asked for.
+    agenda: Option<(NaiveDate, NaiveDate)>,
     /// The search query to answer after every change, once asked for.
     search: Option<String>,
     /// Whether that search is by meaning.
@@ -663,8 +664,8 @@ fn handle_other(o: &mut Open, request: Request, loaded: Option<&str>, emit: &mut
 /// The agenda, refile-target and operation requests.
 fn handle_op(o: &mut Open, request: Request, loaded: Option<&str>, emit: &mut dyn FnMut(Event)) {
     match request {
-        Request::Agenda(days) => {
-            o.agenda = Some(days);
+        Request::Agenda(from, to) => {
+            o.agenda = Some((from, to));
             emit_agenda(o, emit);
         }
         Request::Search { query, meaning } => {
@@ -1060,16 +1061,13 @@ fn ask_meaning(o: &mut Open, query: &str, emit: &mut dyn FnMut(Event)) {
 }
 
 fn emit_agenda(o: &Open, emit: &mut dyn FnMut(Event)) {
-    let Some(days) = o.agenda else { return };
+    let Some((from, to)) = o.agenda else { return };
     match o.index.all() {
         Ok(notes) => {
-            let opts = agenda::Options {
-                today: chrono::Local::now().date_naive(),
-                days,
-                warning_days: o.settings.warning_days,
-                include_done: false,
-            };
-            emit(Event::Agenda(Arc::new(agenda::build(&notes, &opts))));
+            let today = chrono::Local::now().date_naive();
+            emit(Event::Agenda(Arc::new(calendar::build(
+                &notes, from, to, today,
+            ))));
         }
         Err(e) => emit(Event::Error(e.to_string())),
     }
@@ -1511,12 +1509,13 @@ about the milk run
             dir.path(),
             &[("a.org", "* TODO one\nSCHEDULED: <2026-11-01 Sun>\n* two\n")],
         );
-        h.send(Request::Agenda(3));
+        let today = chrono::Local::now().date_naive();
+        h.send(Request::Agenda(today, today));
         let a = h.wait(|e| match e {
             Event::Agenda(a) => Some(a),
             _ => None,
         });
-        assert_eq!(a.overdue.len(), 1);
+        assert_eq!(a.on(today).len(), 1);
         h.send(Request::Load("a.org".into()));
         let base = h.wait(|e| match e {
             Event::Document(_, _, r) => Some(r),
@@ -1575,7 +1574,7 @@ about the milk run
             Event::Error(e) => panic!("{e}"),
             _ => None,
         });
-        assert_eq!(a.overdue, []);
+        assert_eq!(a.on(today), []);
         h.send(Request::Targets);
         let t = h.wait(|e| match e {
             Event::Targets(t) => Some(t),

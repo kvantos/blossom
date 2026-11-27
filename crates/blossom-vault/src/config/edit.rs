@@ -90,6 +90,17 @@ pub const TEMPLATE: &str = r#"# Blossom's settings, read by the app and by `blsm
 # C-k (kill to the end of the line), C-y (yank), M-< M->. Off gives the usual keys.
 # emacs_keys = true
 
+[agenda]
+# The first day of the week: system (your system's choice), monday, sunday or saturday.
+# week_start = "system"
+
+# Working hours: the week view opens on them and shades the rest. Whole hours.
+# working_hours = "08:00-20:00"
+
+# Up to two more time zones, each shown as an hour column beside yours in the
+# week view (e.g. ["America/New_York", "Asia/Tokyo"]).
+# time_zones = []
+
 [semantic]
 # Search by meaning: english (built in), multilingual (built in, downloaded
 # on first use) or server (an OpenAI-compatible server such as Ollama).
@@ -114,6 +125,8 @@ pub enum Value {
     Int(i64),
     /// A switch.
     Bool(bool),
+    /// A list of strings.
+    List(Vec<String>),
 }
 
 impl Value {
@@ -123,6 +136,11 @@ impl Value {
             Value::Str(s) => s.as_str().into(),
             Value::Int(n) => (*n).into(),
             Value::Bool(b) => (*b).into(),
+            Value::List(l) => l
+                .iter()
+                .map(String::as_str)
+                .collect::<toml_edit::Array>()
+                .into(),
         };
         v.to_string().trim().to_string()
     }
@@ -495,6 +513,25 @@ mod tests {
         );
         assert_eq!(c.attachments_folder(), crate::attach::DEFAULT_FOLDER);
         assert_eq!(c.keywords(), blossom_core::Keywords::default());
+    }
+
+    #[test]
+    fn lists_are_written_as_arrays() {
+        let zones = Value::List(vec!["Asia/Tokyo".into(), "UTC".into()]);
+        let out = change(TEMPLATE, &Change::set(Some("agenda"), "time_zones", zones));
+        assert!(
+            out.contains("\ntime_zones = [\"Asia/Tokyo\", \"UTC\"]\n"),
+            "{out}"
+        );
+        let c: Config = toml::from_str(&out).unwrap();
+        assert_eq!(c.agenda.time_zones, ["Asia/Tokyo", "UTC"]);
+        // A config from before the table existed gets it.
+        let out = change(
+            "[editor]\n",
+            &Change::set(Some("agenda"), "week_start", "sunday"),
+        );
+        let c: Config = toml::from_str(&out).unwrap();
+        assert_eq!(c.agenda.week_start.as_deref(), Some("sunday"));
     }
 
     #[test]

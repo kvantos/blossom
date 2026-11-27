@@ -4,9 +4,10 @@
 //! `BLOSSOM_SCREENSHOT_EDIT` is set) or shows the search screen for
 //! `BLOSSOM_SCREENSHOT_SEARCH` (a query, may be empty; by meaning with
 //! `BLOSSOM_SCREENSHOT_MEANING`), opens the Settings panel with
-//! `BLOSSOM_SCREENSHOT_APPEARANCE` (at section `editor`, `notes` or `search` with
+//! `BLOSSOM_SCREENSHOT_APPEARANCE` (at section `editor`, `agenda`, `notes` or `search` with
 //! `BLOSSOM_SCREENSHOT_SECTION`), opens the "New file" form with a name
-//! typed with `BLOSSOM_SCREENSHOT_NEW_FILE`, saves a screenshot of the window as
+//! typed with `BLOSSOM_SCREENSHOT_NEW_FILE`, shows the agenda with
+//! `BLOSSOM_SCREENSHOT_AGENDA` (`week`, `month`, `quarter` or `year`), saves a screenshot of the window as
 //! PNG and exits. `BLOSSOM_THEME` (`light`, `dark`, or
 //! `solarized-`/`gray-` + `light`/`dark`) overrides the saved theme. Used
 //! to check the UI without a screenshot tool; not part of normal use.
@@ -32,6 +33,8 @@ pub struct Plan {
     pub edit: bool,
     /// Show the agenda instead of a file.
     pub agenda: bool,
+    /// The agenda's scope (`BLOSSOM_SCREENSHOT_AGENDA=month`…).
+    pub agenda_scope: Option<crate::agenda::Scope>,
     /// Show the search screen with this query instead of a file.
     pub search: Option<String>,
     /// With the "By meaning" switch on.
@@ -84,6 +87,9 @@ impl Plan {
             colours: theme.map(|t| t.0),
             edit: std::env::var_os("BLOSSOM_SCREENSHOT_EDIT").is_some(),
             agenda: std::env::var_os("BLOSSOM_SCREENSHOT_AGENDA").is_some(),
+            agenda_scope: std::env::var("BLOSSOM_SCREENSHOT_AGENDA")
+                .ok()
+                .and_then(|v| toml::Value::String(v).try_into().ok()),
             search: std::env::var("BLOSSOM_SCREENSHOT_SEARCH").ok(),
             meaning: std::env::var_os("BLOSSOM_SCREENSHOT_MEANING").is_some(),
             capture: std::env::var_os("BLOSSOM_SCREENSHOT_CAPTURE").is_some(),
@@ -93,6 +99,7 @@ impl Plan {
                 .ok()
                 .and_then(|s| match s.as_str() {
                     "notes" => Some(crate::settings_panel::Section::Notes),
+                    "agenda" => Some(crate::settings_panel::Section::Agenda),
                     "editor" => Some(crate::settings_panel::Section::Editor),
                     "search" => Some(crate::settings_panel::Section::Search),
                     _ => None,

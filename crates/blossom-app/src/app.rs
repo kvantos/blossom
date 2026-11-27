@@ -28,7 +28,7 @@ use std::sync::Arc;
 use blossom_core::editing;
 use blossom_core::render::Span;
 use blossom_core::{Document, EditError, Heading, PlanningKind, Timestamp};
-use blossom_index::agenda::Agenda;
+use blossom_index::calendar::Calendar;
 use blossom_vault::Revision;
 use blossom_vault::ops::{Change, HeadingRef};
 use chrono::{Datelike, NaiveDate, NaiveTime};
@@ -135,7 +135,9 @@ pub struct App {
     /// What the main area shows.
     view: View,
     /// The latest agenda from the worker.
-    agenda: Option<Arc<Agenda>>,
+    agenda: Option<Arc<Calendar>>,
+    /// Where the agenda is: scope, the day it shows, the timeline open.
+    agenda_place: agenda::Place,
     /// The search screen's query.
     search_input: String,
     /// Results for `search_input`, once they arrive.
@@ -253,6 +255,8 @@ pub enum Message {
     Shot(iced::window::Screenshot),
     /// Show the agenda.
     ShowAgenda,
+    /// The agenda's controls.
+    Agenda(agenda::AgendaMsg),
     /// Show the search screen.
     ShowSearch,
     /// The search field changed.
@@ -384,6 +388,13 @@ impl App {
             } else {
                 View::Files
             },
+            agenda_place: agenda::Place::new(
+                shot.as_ref()
+                    .and_then(|p| p.agenda_scope)
+                    .unwrap_or_default(),
+                today,
+                true,
+            ),
             shot,
             agenda: None,
             search_input,
@@ -411,6 +422,10 @@ impl App {
     pub fn with_state(mut self, path: Option<PathBuf>) -> App {
         self.state = path.as_deref().map_or_else(State::default, State::load);
         self.state_path = path;
+        if self.shot.as_ref().is_none_or(|p| p.agenda_scope.is_none()) {
+            self.agenda_place.scope = self.state.agenda_scope;
+        }
+        self.agenda_place.timeline = !self.state.timeline_closed;
         self
     }
 
@@ -461,6 +476,7 @@ impl App {
                     section: settings_panel::Section::default(),
                     server: semantic.server.clone().unwrap_or_default(),
                     server_model: semantic.server_model.clone().unwrap_or_default(),
+                    zones: iced::widget::combo_box::State::new(agenda::prefs::zone_names()),
                 });
                 if self.fonts.is_none() {
                     return Task::perform(async { fonts::installed() }, |i| {
@@ -525,6 +541,26 @@ impl App {
             Setting::EditorSize(n) => new.editor_size = n,
             Setting::Labels(l) => new.top_bar_labels = l,
             Setting::EmacsKeys(on) => new.emacs_keys = on,
+            Setting::WeekStart(w) => new.agenda.week_start = w,
+            Setting::WorkStart(h) => {
+                new.agenda.work = (h.0, new.agenda.work.1.max(h.0 + 1));
+            }
+            Setting::WorkEnd(h) => {
+                new.agenda.work = (new.agenda.work.0.min(h.0.saturating_sub(1)), h.0);
+            }
+            Setting::AddZone(name) => {
+                if let Ok(tz) = name.parse::<chrono_tz::Tz>()
+                    && !new.agenda.zones.contains(&tz)
+                    && new.agenda.zones.len() < agenda::prefs::MAX_ZONES
+                {
+                    new.agenda.zones.push(tz);
+                }
+            }
+            Setting::RemoveZone(i) => {
+                if i < new.agenda.zones.len() {
+                    new.agenda.zones.remove(i);
+                }
+            }
         }
         self.set_settings(new);
         Task::none()
@@ -580,12 +616,60 @@ impl App {
     /// Uses new Appearance choices and writes them to the config.
     fn set_settings(&mut self, settings: Settings) {
         let changes = settings.changes_from(&self.settings);
+        let agenda_changed = settings.agenda != self.settings.agenda;
         self.settings = settings;
+        if agenda_changed && self.view == View::Agenda {
+            self.send_agenda();
+        }
         if let Some(path) = &self.config_path
             && let Err(e) = edit::apply(path, &changes)
         {
             self.status = Some(format!("Couldn't save the appearance settings: {e}"));
         }
+    }
+
+    /// Asks the worker for the agenda's days.
+    fn send_agenda(&self) {
+        if let Some(w) = &self.worker {
+            let (from, to) = self.agenda_place.fetch(&self.settings.agenda);
+            w.send(Request::Agenda(from, to));
+        }
+    }
+
+    /// Scrolls the week's hour grid to the start of the working hours.
+    fn agenda_to_work_hours(&self) -> Task<Message> {
+        if self.agenda_place.scope != agenda::Scope::Week {
+            return Task::none();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let y = self.settings.agenda.work.0 as f32 * agenda::week::HOUR;
+        iced::widget::operation::scroll_to(
+            agenda::week::grid_id(),
+            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
+        )
+    }
+
+    /// The agenda's controls: move, change scope, open or close the
+    /// timeline (the last two are remembered).
+    fn on_agenda(&mut self, m: &agenda::AgendaMsg) -> Task<Message> {
+        let before = self.agenda_place;
+        if self.agenda_place.update(m, self.today) {
+            self.send_agenda();
+        }
+        let p = self.agenda_place;
+        if p.scope != before.scope || p.timeline != before.timeline {
+            self.state.agenda_scope = p.scope;
+            self.state.timeline_closed = !p.timeline;
+            if let Some(path) = &self.state_path
+                && let Err(e) = self.state.save(path)
+            {
+                self.status = Some(format!("Couldn't remember the agenda's layout: {e}"));
+            }
+        }
+        if p.scope != before.scope {
+            return self.agenda_to_work_hours();
+        }
+        Task::none()
     }
 
     /// The "New file" form's messages.
@@ -866,10 +950,11 @@ impl App {
         match message {
             Message::ShowAgenda => {
                 self.view = View::Agenda;
-                if let Some(w) = &self.worker {
-                    w.send(Request::Agenda(agenda::DAYS));
-                }
+                self.agenda_place.anchor = self.today;
+                self.send_agenda();
+                return self.agenda_to_work_hours();
             }
+            Message::Agenda(m) => return self.on_agenda(&m),
             Message::ShowSearch => {
                 self.view = View::Search;
                 self.send_search();
@@ -1182,12 +1267,10 @@ impl App {
     /// A vault is open: everything shown for the old one goes; after a
     /// worker restart, the file that was open comes back.
     fn on_opened(&mut self, root: PathBuf) {
-        if self.view == View::Agenda
-            && let Some(w) = &self.worker
-        {
-            w.send(Request::Agenda(agenda::DAYS));
-        }
         self.agenda = None;
+        if self.view == View::Agenda {
+            self.send_agenda();
+        }
         self.search = None;
         self.meaning = None;
         if self.view == View::Search {
@@ -1311,11 +1394,14 @@ impl App {
             Event::Agenda(a) => {
                 let first = self.agenda.is_none();
                 self.agenda = Some(a);
-                if first
-                    && self.view == View::Agenda
-                    && let Some(plan) = self.shot.clone()
-                {
-                    return self.shoot(&plan);
+                if first && self.view == View::Agenda {
+                    // The hour grid exists from now on: open it on the
+                    // working hours.
+                    let scroll = self.agenda_to_work_hours();
+                    if let Some(plan) = self.shot.clone() {
+                        return scroll.chain(self.shoot(&plan));
+                    }
+                    return scroll;
                 }
             }
             Event::Meaning(status) => {
@@ -2203,9 +2289,16 @@ impl App {
             )
         } else if self.view == View::Agenda {
             self.beside_sidebar(
-                container(agenda::view(self.agenda.as_deref(), self.today))
-                    .width(Fill)
-                    .height(Fill),
+                container(agenda::view(&agenda::View {
+                    calendar: self.agenda.as_deref(),
+                    place: self.agenda_place,
+                    prefs: &self.settings.agenda,
+                    today: self.today,
+                    now: now_hours(),
+                    files: &self.files,
+                }))
+                .width(Fill)
+                .height(Fill),
             )
         } else {
             self.beside_sidebar(
@@ -3095,6 +3188,15 @@ pub(crate) fn chip<'a>(label: String, kind: Chip) -> Element<'a, Message> {
         .into()
 }
 
+/// The local time now as hours: 10.5 is 10:30.
+fn now_hours() -> f32 {
+    use chrono::Timelike;
+    let t = chrono::Local::now().time();
+    #[allow(clippy::cast_precision_loss)]
+    let h = t.hour() as f32 + t.minute() as f32 / 60.0;
+    h
+}
+
 pub(crate) fn placeholder(msg: &str) -> Element<'_, Message> {
     container(text(msg).size(14).style(dim)).center(Fill).into()
 }
@@ -3342,6 +3444,80 @@ mod tests {
         let _ = a.update(Message::NewFile(NewFileMsg::Open));
         let _ = a.update(Message::NewFile(NewFileMsg::Cancel));
         assert!(a.new_file.is_none());
+    }
+
+    #[test]
+    fn the_agenda_moves_remembers_its_layout_and_follows_its_settings() {
+        use crate::agenda::{AgendaMsg, Scope};
+        use crate::settings_panel::{Hour, Section};
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        edit::create(&config).unwrap();
+        let state = dir.path().join("state.toml");
+        let mut a = loaded("* one\n").with_state(Some(state.clone()));
+        a.config_path = Some(config.clone());
+        let _ = a.update(Message::ShowAgenda);
+        assert_eq!(a.view, View::Agenda);
+        // Every scope draws, with a calendar or while it loads.
+        let today = a.today;
+        let notes: Vec<blossom_index::Note> = blossom_index::records(
+            "a.org",
+            &Document::parse(
+                "* TODO Plan [1/2]\nSCHEDULED: <2026-11-01 Sun> DEADLINE: <2026-12-24 Thu>\n\
+                 * Meet\n<2026-11-27 Fri 10:00>\n* TODO Due\nDEADLINE: <2026-11-20 Fri>\n",
+                Keywords::default(),
+            ),
+            &Keywords::default(),
+            0,
+        )
+        .into_iter()
+        .map(blossom_index::Note::from)
+        .collect();
+        for scope in Scope::ALL {
+            let _ = a.update(Message::Agenda(AgendaMsg::Scope(scope)));
+            let _ = a.view();
+            let (from, to) = a.agenda_place.fetch(&a.settings.agenda);
+            let cal = blossom_index::calendar::build(&notes, from, to, today);
+            let _ = a.update(Message::Worker(Event::Agenda(Arc::new(cal))));
+            let _ = a.view();
+        }
+        let _ = a.update(Message::Agenda(AgendaMsg::Scope(Scope::Month)));
+        let _ = a.update(Message::Agenda(AgendaMsg::ToggleTimeline));
+        let _ = a.update(Message::Agenda(AgendaMsg::Next));
+        assert_ne!(a.agenda_place.anchor, today);
+        let _ = a.update(Message::Agenda(AgendaMsg::Today));
+        assert_eq!(a.agenda_place.anchor, today);
+        let saved = State::load(&state);
+        assert_eq!(
+            (saved.agenda_scope, saved.timeline_closed),
+            (Scope::Month, true)
+        );
+        // A new run starts where this one left off.
+        let b = app().with_state(Some(state));
+        assert_eq!(b.agenda_place.scope, Scope::Month);
+        assert!(!b.agenda_place.timeline);
+        // The Settings panel's Agenda section writes [agenda].
+        let _ = a.update(Message::Setting(Setting::Open));
+        let _ = a.update(Message::Setting(Setting::Section(Section::Agenda)));
+        let _ = a.view();
+        let _ = a.update(Message::Setting(Setting::WeekStart(
+            crate::agenda::prefs::WeekStart::Monday,
+        )));
+        let _ = a.update(Message::Setting(Setting::WorkStart(Hour(9))));
+        let _ = a.update(Message::Setting(Setting::WorkEnd(Hour(9))));
+        assert_eq!(a.settings.agenda.work, (8, 9));
+        let _ = a.update(Message::Setting(Setting::AddZone("Asia/Tokyo".into())));
+        let _ = a.update(Message::Setting(Setting::AddZone("Asia/Tokyo".into())));
+        let _ = a.update(Message::Setting(Setting::AddZone("Nowhere".into())));
+        let c = Config::load(&config).unwrap().agenda;
+        assert_eq!(c.week_start.as_deref(), Some("monday"));
+        assert_eq!(c.working_hours.as_deref(), Some("08:00-09:00"));
+        assert_eq!(c.time_zones, ["Asia/Tokyo"]);
+        let _ = a.update(Message::Setting(Setting::RemoveZone(0)));
+        assert_eq!(
+            Config::load(&config).unwrap().agenda.time_zones,
+            Vec::<String>::new()
+        );
     }
 
     #[test]

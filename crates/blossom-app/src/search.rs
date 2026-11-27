@@ -407,6 +407,7 @@ mod tests {
                 id: None,
                 custom_id: None,
                 modified: 0,
+                progress: None,
                 text: String::new(),
             })
         };
