@@ -7,7 +7,8 @@
 //! `BLOSSOM_SCREENSHOT_APPEARANCE` (at section `editor`, `agenda`, `notes` or `search` with
 //! `BLOSSOM_SCREENSHOT_SECTION`), opens the "New file" form with a name
 //! typed with `BLOSSOM_SCREENSHOT_NEW_FILE`, shows the agenda with
-//! `BLOSSOM_SCREENSHOT_AGENDA` (`week`, `month`, `quarter` or `year`), saves a screenshot of the window as
+//! `BLOSSOM_SCREENSHOT_AGENDA` (`week`, `month`, `quarter` or `year`; its
+//! file menu open with `BLOSSOM_SCREENSHOT_AGENDA_MENU`), saves a screenshot of the window as
 //! PNG and exits. `BLOSSOM_THEME` (`light`, `dark`, or
 //! `solarized-`/`gray-` + `light`/`dark`) overrides the saved theme. Used
 //! to check the UI without a screenshot tool; not part of normal use.
@@ -35,6 +36,8 @@ pub struct Plan {
     pub agenda: bool,
     /// The agenda's scope (`BLOSSOM_SCREENSHOT_AGENDA=month`…).
     pub agenda_scope: Option<crate::agenda::Scope>,
+    /// Open the agenda's file menu (`BLOSSOM_SCREENSHOT_AGENDA_MENU`).
+    pub agenda_menu: bool,
     /// Show the search screen with this query instead of a file.
     pub search: Option<String>,
     /// With the "By meaning" switch on.
@@ -87,6 +90,7 @@ impl Plan {
             colours: theme.map(|t| t.0),
             edit: std::env::var_os("BLOSSOM_SCREENSHOT_EDIT").is_some(),
             agenda: std::env::var_os("BLOSSOM_SCREENSHOT_AGENDA").is_some(),
+            agenda_menu: std::env::var_os("BLOSSOM_SCREENSHOT_AGENDA_MENU").is_some(),
             agenda_scope: std::env::var("BLOSSOM_SCREENSHOT_AGENDA")
                 .ok()
                 .and_then(|v| toml::Value::String(v).try_into().ok()),

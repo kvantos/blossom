@@ -136,6 +136,8 @@ pub struct App {
     view: View,
     /// The latest agenda from the worker.
     agenda: Option<Arc<Calendar>>,
+    /// The agenda with only the chosen files.
+    agenda_shown: Option<Arc<Calendar>>,
     /// Where the agenda is: scope, the day it shows, the timeline open.
     agenda_place: agenda::Place,
     /// The search screen's query.
@@ -397,6 +399,7 @@ impl App {
             ),
             shot,
             agenda: None,
+            agenda_shown: None,
             search_input,
             search: None,
             search_meaning,
@@ -652,6 +655,26 @@ impl App {
     /// The agenda's controls: move, change scope, open or close the
     /// timeline (the last two are remembered).
     fn on_agenda(&mut self, m: &agenda::AgendaMsg) -> Task<Message> {
+        match m {
+            agenda::AgendaMsg::AllFiles(on) => {
+                self.choose_agenda_files((!on).then(Vec::new));
+                return Task::none();
+            }
+            agenda::AgendaMsg::File(path, on) => {
+                let mut chosen: Vec<String> = match self.agenda_files() {
+                    Some(c) => c.to_vec(),
+                    None => self.files.iter().map(|f| f.path.clone()).collect(),
+                };
+                chosen.retain(|p| p != path);
+                if *on {
+                    chosen.push(path.clone());
+                }
+                let all = self.files.iter().all(|f| chosen.contains(&f.path));
+                self.choose_agenda_files((!all).then_some(chosen));
+                return Task::none();
+            }
+            _ => {}
+        }
         let before = self.agenda_place;
         if self.agenda_place.update(m, self.today) {
             self.send_agenda();
@@ -670,6 +693,33 @@ impl App {
             return self.agenda_to_work_hours();
         }
         Task::none()
+    }
+
+    /// The files the agenda shows in this folder; `None` for all.
+    fn agenda_files(&self) -> Option<&[String]> {
+        self.state.agenda_files(self.root.as_deref()?)
+    }
+
+    /// Shows only `files` in the agenda (`None`: all), and remembers it.
+    fn choose_agenda_files(&mut self, files: Option<Vec<String>>) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        self.state.set_agenda_files(&root, files);
+        if let Some(path) = &self.state_path
+            && let Err(e) = self.state.save(path)
+        {
+            self.status = Some(format!("Couldn't remember the agenda's files: {e}"));
+        }
+        self.filter_agenda();
+    }
+
+    /// The agenda with only the chosen files.
+    fn filter_agenda(&mut self) {
+        self.agenda_shown = self.agenda.as_ref().map(|a| match self.agenda_files() {
+            None => Arc::clone(a),
+            Some(chosen) => Arc::new(a.only(|p| chosen.iter().any(|c| c == p))),
+        });
     }
 
     /// The "New file" form's messages.
@@ -1268,6 +1318,7 @@ impl App {
     /// worker restart, the file that was open comes back.
     fn on_opened(&mut self, root: PathBuf) {
         self.agenda = None;
+        self.agenda_shown = None;
         if self.view == View::Agenda {
             self.send_agenda();
         }
@@ -1394,6 +1445,7 @@ impl App {
             Event::Agenda(a) => {
                 let first = self.agenda.is_none();
                 self.agenda = Some(a);
+                self.filter_agenda();
                 if first && self.view == View::Agenda {
                     // The hour grid exists from now on: open it on the
                     // working hours.
@@ -2121,6 +2173,10 @@ impl App {
             if self.settings_panel.take().is_some() || self.new_file.take().is_some() {
                 return Task::none();
             }
+            if self.view == View::Agenda && self.agenda_place.menu {
+                self.agenda_place.menu = false;
+                return Task::none();
+            }
             if self.refile.take().is_some() {
                 return Task::none();
             }
@@ -2189,6 +2245,9 @@ impl App {
         if let Some(name) = &plan.new_file {
             let _ = self.on_new_file(NewFileMsg::Open);
             let _ = self.on_new_file(NewFileMsg::Name(name.clone()));
+        }
+        if plan.agenda_menu {
+            self.agenda_place.menu = true;
         }
         if plan.appearance {
             let _ = self.on_setting(Setting::Open);
@@ -2290,12 +2349,13 @@ impl App {
         } else if self.view == View::Agenda {
             self.beside_sidebar(
                 container(agenda::view(&agenda::View {
-                    calendar: self.agenda.as_deref(),
+                    calendar: self.agenda_shown.as_deref(),
                     place: self.agenda_place,
                     prefs: &self.settings.agenda,
                     today: self.today,
                     now: now_hours(),
                     files: &self.files,
+                    chosen: self.agenda_files(),
                 }))
                 .width(Fill)
                 .height(Fill),
@@ -3518,6 +3578,76 @@ mod tests {
             Config::load(&config).unwrap().agenda.time_zones,
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn the_agenda_shows_the_chosen_files_and_remembers_them() {
+        use crate::agenda::AgendaMsg;
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.toml");
+        let mut a = loaded("* one\n").with_state(Some(state.clone()));
+        a.root = Some(dir.path().to_path_buf());
+        a.files = Arc::new(
+            ["a.org", "b.org"]
+                .map(|p| FileInfo {
+                    path: p.into(),
+                    headings: 0,
+                    open_tasks: 0,
+                    conflict: false,
+                })
+                .to_vec(),
+        );
+        let _ = a.update(Message::ShowAgenda);
+        let notes: Vec<blossom_index::Note> = ["a.org", "b.org"]
+            .iter()
+            .flat_map(|p| {
+                blossom_index::records(
+                    p,
+                    &Document::parse("* Meet\n<2026-11-27 Fri 10:00>\n", Keywords::default()),
+                    &Keywords::default(),
+                    0,
+                )
+            })
+            .map(blossom_index::Note::from)
+            .collect();
+        let day = NaiveDate::from_ymd_opt(2026, 11, 27).unwrap();
+        let cal = blossom_index::calendar::build(&notes, day, day, day);
+        let _ = a.update(Message::Worker(Event::Agenda(Arc::new(cal))));
+        let shown = |a: &App| a.agenda_shown.as_ref().unwrap().on(day).len();
+        assert_eq!(shown(&a), 2);
+        let _ = a.update(Message::Agenda(AgendaMsg::FilesMenu));
+        assert!(a.agenda_place.menu);
+        let _ = a.view();
+        let _ = a.update(Message::Agenda(AgendaMsg::File("a.org".into(), false)));
+        assert_eq!(shown(&a), 1);
+        assert_eq!(a.agenda_files(), Some(&["b.org".to_string()][..]));
+        // Remembered for this folder.
+        let b = app().with_state(Some(state.clone()));
+        assert_eq!(
+            b.state.agenda_files(dir.path()),
+            Some(&["b.org".to_string()][..])
+        );
+        // Ticking it again is all files once more; none is none.
+        let _ = a.update(Message::Agenda(AgendaMsg::File("a.org".into(), true)));
+        assert_eq!((a.agenda_files(), shown(&a)), (None, 2));
+        let _ = a.update(Message::Agenda(AgendaMsg::AllFiles(false)));
+        assert_eq!(a.agenda_shown.as_ref().unwrap().on(day), []);
+        let _ = a.view();
+        let _ = a.update(Message::Agenda(AgendaMsg::AllFiles(true)));
+        assert_eq!(shown(&a), 2);
+        // Esc closes the menu.
+        let _ = a.update(Message::Key(keyboard::Event::KeyPressed {
+            key: Key::Named(keyboard::key::Named::Escape),
+            modified_key: Key::Named(keyboard::key::Named::Escape),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        }));
+        assert!(!a.agenda_place.menu);
     }
 
     #[test]

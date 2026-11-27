@@ -19,6 +19,8 @@ pub struct State {
     pub agenda_scope: crate::agenda::Scope,
     /// The agenda's timeline was closed.
     pub timeline_closed: bool,
+    /// Notes folder → the files the agenda shows, when not all of them.
+    pub agenda_files: BTreeMap<String, Vec<String>>,
 }
 
 /// `state.toml` in the platform data folder.
@@ -65,6 +67,25 @@ impl State {
     #[must_use]
     pub fn last_file(&self, root: &Path) -> Option<&str> {
         self.last_file.get(&State::key(root)).map(String::as_str)
+    }
+
+    /// The files the agenda shows in `root`; `None` for all of them.
+    #[must_use]
+    pub fn agenda_files(&self, root: &Path) -> Option<&[String]> {
+        self.agenda_files.get(&State::key(root)).map(Vec::as_slice)
+    }
+
+    /// Shows only `files` in `root`'s agenda (`None`: all of them).
+    pub fn set_agenda_files(&mut self, root: &Path, files: Option<Vec<String>>) {
+        let key = State::key(root);
+        match files {
+            Some(f) => {
+                self.agenda_files.insert(key, f);
+            }
+            None => {
+                self.agenda_files.remove(&key);
+            }
+        }
     }
 
     /// Remembers `file` as open in `root`; whether that changed anything.

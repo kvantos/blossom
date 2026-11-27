@@ -91,6 +91,34 @@ pub struct Calendar {
 }
 
 impl Calendar {
+    /// The same calendar with only the files `keep` accepts.
+    #[must_use]
+    pub fn only(&self, keep: impl Fn(&str) -> bool) -> Calendar {
+        Calendar {
+            from: self.from,
+            to: self.to,
+            today: self.today,
+            ongoing: self
+                .ongoing
+                .iter()
+                .filter(|s| keep(&s.note.record.path))
+                .cloned()
+                .collect(),
+            days: self
+                .days
+                .iter()
+                .filter_map(|(d, items)| {
+                    let items: Vec<Item> = items
+                        .iter()
+                        .filter(|i| keep(&i.note.record.path))
+                        .cloned()
+                        .collect();
+                    (!items.is_empty()).then_some((*d, items))
+                })
+                .collect(),
+        }
+    }
+
     /// The items on `day`.
     #[must_use]
     pub fn on(&self, day: NaiveDate) -> &[Item] {
@@ -334,5 +362,17 @@ mod tests {
         let past = build(&n, day(16), day(22), day(26));
         assert_eq!(titles(&past, 20), []);
         assert_eq!(titles(&past, 16), [("Standup".into(), None)]);
+        // Keeping one file.
+        let mut other = notes("* Gym\n<2026-11-26 Thu 07:00>\n");
+        for n in &mut other {
+            n.record.path = "b.org".into();
+        }
+        let both: Vec<Note> = n.iter().cloned().chain(other).collect();
+        let c = build(&both, day(22), day(28), day(26));
+        assert_eq!(c.on(day(26)).len(), 4);
+        let b = c.only(|p| p == "b.org");
+        assert_eq!(titles(&b, 26), [("Gym".into(), None)]);
+        assert_eq!(b.ongoing, []);
+        assert_eq!(b.days.len(), 1);
     }
 }

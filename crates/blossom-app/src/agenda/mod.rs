@@ -18,7 +18,7 @@ use blossom_index::calendar::{Calendar, Item, Kind};
 use chrono::{Datelike, Days, Months, NaiveDate};
 use chrono_tz::Tz;
 use iced::widget::{
-    Column, button, column, container, row, rule, scrollable, space, text, tooltip,
+    Column, button, checkbox, column, container, row, rule, scrollable, space, text, tooltip,
 };
 use iced::{Color, Element, Fill, Theme};
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,12 @@ pub enum AgendaMsg {
     Jump(NaiveDate, Option<Scope>),
     /// Open or close the timeline.
     ToggleTimeline,
+    /// Open or close the file menu.
+    FilesMenu,
+    /// Show every file (or, unticked, none).
+    AllFiles(bool),
+    /// Show or hide one file.
+    File(String, bool),
 }
 
 /// Where the agenda is.
@@ -85,6 +91,8 @@ pub struct Place {
     pub anchor: NaiveDate,
     /// The timeline is open.
     pub timeline: bool,
+    /// The file menu is open.
+    pub menu: bool,
 }
 
 impl Place {
@@ -95,6 +103,7 @@ impl Place {
             scope,
             anchor: today,
             timeline,
+            menu: false,
         }
     }
 
@@ -113,6 +122,9 @@ impl Place {
                 }
             }
             AgendaMsg::ToggleTimeline => self.timeline = !self.timeline,
+            AgendaMsg::FilesMenu => self.menu = !self.menu,
+            // The app keeps the chosen files.
+            AgendaMsg::AllFiles(_) | AgendaMsg::File(..) => {}
         }
         self.scope != before.scope || self.anchor != before.anchor
     }
@@ -232,9 +244,28 @@ pub struct View<'a> {
     /// The notes folder's files, in the sidebar's order: a file's colour
     /// is its place here, so files keep their colours from view to view.
     pub files: &'a [crate::tree::FileInfo],
+    /// The files shown, when not all of them.
+    pub chosen: Option<&'a [String]>,
 }
 
 impl View<'_> {
+    /// Whether the agenda shows the file at `path`.
+    #[must_use]
+    pub fn shows(&self, path: &str) -> bool {
+        self.chosen.is_none_or(|c| c.iter().any(|p| p == path))
+    }
+
+    /// The file button's label: `All files`, `2 of 4 files`, `No files`.
+    #[must_use]
+    pub fn files_label(&self) -> String {
+        let shown = self.files.iter().filter(|f| self.shows(&f.path)).count();
+        match shown {
+            _ if self.chosen.is_none() || shown == self.files.len() => "All files".into(),
+            0 => "No files".into(),
+            n => format!("{n} of {} files", self.files.len()),
+        }
+    }
+
     /// The colour slot of the file at `path`.
     #[must_use]
     pub fn slot(&self, path: &str) -> usize {
@@ -244,8 +275,13 @@ impl View<'_> {
 
 /// The whole agenda pane.
 pub fn view<'a>(v: &View<'a>) -> Element<'a, Message> {
+    let top: Element<'a, Message> = if v.place.menu {
+        column![toolbar(v), files_menu(v)].into()
+    } else {
+        toolbar(v)
+    };
     let Some(cal) = v.calendar else {
-        return column![toolbar(v), placeholder("Loading the agenda…")].into();
+        return column![top, placeholder("Loading the agenda…")].into();
     };
     let mut parts: Vec<Element<'a, Message>> = Vec::new();
     if let Some(months) = v.place.strip() {
@@ -261,7 +297,7 @@ pub fn view<'a>(v: &View<'a>) -> Element<'a, Message> {
     };
     parts.push(body);
     column![
-        toolbar(v),
+        top,
         rule::horizontal(1),
         scrollable(Column::with_children(parts)).height(Fill)
     ]
@@ -322,10 +358,51 @@ fn toolbar<'a>(v: &View<'a>) -> Element<'a, Message> {
         text(v.place.title(v.prefs)).size(17).font(bold()),
         space::horizontal(),
         scopes,
+        button(text(format!("{} ▾", v.files_label())).size(13))
+            .on_press(send(AgendaMsg::FilesMenu))
+            .padding([3, 10])
+            .style(style::row(v.place.menu)),
     ]
     .spacing(8)
     .padding([8, 14])
     .align_y(iced::Center)
+    .into()
+}
+
+/// The file menu: All files, then a box for each file in its colour.
+fn files_menu<'a>(v: &View<'a>) -> Element<'a, Message> {
+    let all = v.chosen.is_none() || v.files.iter().all(|f| v.shows(&f.path));
+    let mut items: Vec<Element<'a, Message>> = vec![
+        checkbox(all)
+            .label("All files")
+            .on_toggle(|on| send(AgendaMsg::AllFiles(on)))
+            .text_size(13)
+            .into(),
+        rule::horizontal(1).into(),
+    ];
+    for (slot, f) in v.files.iter().enumerate() {
+        let path = f.path.clone();
+        items.push(
+            row![
+                dot_for(slot),
+                checkbox(v.shows(&f.path))
+                    .label(f.path.clone())
+                    .on_toggle(move |on| send(AgendaMsg::File(path.clone(), on)))
+                    .text_size(13),
+            ]
+            .spacing(8)
+            .align_y(iced::Center)
+            .into(),
+        );
+    }
+    container(
+        container(Column::with_children(items).spacing(6))
+            .padding([10, 12])
+            .width(280)
+            .style(style::modal),
+    )
+    .align_right(Fill)
+    .padding([0, 14])
     .into()
 }
 
