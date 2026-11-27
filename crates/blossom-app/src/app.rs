@@ -259,6 +259,8 @@ pub enum Message {
     ShowAgenda,
     /// The agenda's controls.
     Agenda(agenda::AgendaMsg),
+    /// A formatting button over the editor.
+    Format(crate::format::Format),
     /// Show the search screen.
     ShowSearch,
     /// The search field changed.
@@ -1049,6 +1051,7 @@ impl App {
                 return self.agenda_to_work_hours();
             }
             Message::Agenda(m) => return self.on_agenda(&m),
+            Message::Format(f) => return self.format(f),
             Message::ShowSearch => {
                 self.view = View::Search;
                 self.send_search();
@@ -2076,6 +2079,17 @@ impl App {
         }
     }
 
+    /// A formatting button: changes the open editor's text, then gives the
+    /// focus back to it (the click took it).
+    fn format(&mut self, f: crate::format::Format) -> Task<Message> {
+        self.edit_text(Group::Single, |c, _| crate::format::apply(c, f));
+        iced::widget::operation::focus(if self.capture.is_some() {
+            capture_editor::EDITOR
+        } else {
+            EDITOR_ID
+        })
+    }
+
     /// Enter in the editor, continuing or ending a list.
     fn enter(&mut self) {
         self.edit_text(Group::Single, |c, _| {
@@ -2858,6 +2872,7 @@ impl App {
         if let Some(h) = heading {
             parts.push(self.metadata(h, doc));
         }
+        parts.push(crate::format::toolbar());
         let ink = self.ink();
         parts.push(
             text_editor(&ed.content)
@@ -4245,6 +4260,36 @@ mod tests {
         assert!(!a.sidebar);
         press(&mut a, ",", Modifiers::CTRL);
         assert!(a.settings_panel.is_some());
+    }
+
+    #[test]
+    fn formatting_buttons_edit_the_section_and_capture() {
+        use crate::format::Format;
+        let mut a = loaded("* one\nbuy milk\n");
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        let _ = a.update(Message::StartEditing);
+        let _ = a.view();
+        let go = |a: &mut App, m| {
+            let _ = a.update(Message::EditorAction(Action::Move(m)));
+        };
+        go(&mut a, Motion::DocumentStart);
+        go(&mut a, Motion::Down);
+        let _ = a.update(Message::Format(Format::Checkbox));
+        assert_eq!(text_of(&a), "* one\n- [ ] buy milk\n");
+        // Select "milk" and make it bold; undo takes it back.
+        go(&mut a, Motion::End);
+        let _ = a.update(Message::EditorAction(Action::Select(Motion::WordLeft)));
+        let _ = a.update(Message::Format(Format::Bold));
+        assert_eq!(text_of(&a), "* one\n- [ ] buy *milk*\n");
+        let _ = a.update(Message::EditorCommand(Command::Undo));
+        assert_eq!(text_of(&a), "* one\n- [ ] buy milk\n");
+        // In capture, the entry changes and the file doesn't.
+        let _ = a.update(Message::EditorCommand(Command::Done));
+        let _ = a.update(Message::OpenCapture);
+        let _ = a.update(Message::Format(Format::Bold));
+        let entry = a.capture.as_ref().unwrap().entry();
+        assert!(entry.ends_with("**"), "{entry}");
+        assert_eq!(text_of(&a), "* one\n- [ ] buy milk\n");
     }
 
     #[test]

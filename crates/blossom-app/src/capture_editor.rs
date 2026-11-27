@@ -244,6 +244,7 @@ pub fn view<'a>(
             .into(),
         );
     }
+    parts.push(crate::format::toolbar());
     parts.push(
         text_editor(&c.content)
             .id(EDITOR)

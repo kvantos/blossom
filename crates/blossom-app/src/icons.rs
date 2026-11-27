@@ -1,5 +1,5 @@
 //! Small outline icons (24×24, drawn in the text colour) for the diagram
-//! tools.
+//! tools and the editor's formatting toolbar.
 
 use std::sync::LazyLock;
 
@@ -43,6 +43,21 @@ icon!(ELLIPSE, r##"<ellipse cx="12" cy="12" rx="8.5" ry="6.5"/>"##);
 icon!(DIAMOND, r##"<path d="M12 3.5l8.5 8.5-8.5 8.5L3.5 12z"/>"##);
 icon!(TEXT, r##"<path d="M5 6V4.5h14V6M12 4.5v15M9 19.5h6"/>"##);
 
+// Formatting.
+icon!(
+    LINK,
+    r##"<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>"##
+);
+icon!(
+    LIST,
+    r##"<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>"##
+);
+icon!(
+    CHECKBOX,
+    r##"<rect x="3.5" y="4" width="7" height="7" rx="1.2"/><path d="M5.3 7.6l1.4 1.4 2.4-3"/><rect x="3.5" y="14" width="7" height="7" rx="1.2"/><path d="M14 7.5h6.5M14 17.5h6.5"/>"##
+);
+icon!(CODE, r##"<path d="M8.5 7L3.5 12l5 5M15.5 7l5 5-5 5"/>"##);
+
 /// `handle` at `size` pixels, in the text colour (or the primary button's
 /// text colour when `on_primary`).
 pub fn view<'a>(handle: &svg::Handle, size: f32, on_primary: bool) -> Element<'a, Message> {
@@ -66,7 +81,8 @@ mod tests {
     #[test]
     fn icons_build() {
         for h in [
-            &SELECT, &PEN, &LINE, &ARROW, &RECT, &ELLIPSE, &DIAMOND, &TEXT,
+            &SELECT, &PEN, &LINE, &ARROW, &RECT, &ELLIPSE, &DIAMOND, &TEXT, &LINK, &LIST,
+            &CHECKBOX, &CODE,
         ] {
             let _ = LazyLock::force(h);
         }

@@ -14,6 +14,7 @@ mod editor;
 mod excalidraw;
 mod file;
 mod fonts;
+mod format;
 mod icons;
 mod keys;
 mod meaning;
