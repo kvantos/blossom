@@ -7,6 +7,7 @@
 
 mod agenda;
 mod app;
+mod capture_editor;
 mod diagram;
 mod draw;
 mod editor;

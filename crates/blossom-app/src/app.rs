@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use blossom_core::editing::{self, ListContinue};
+use blossom_core::editing;
 use blossom_core::render::Span;
 use blossom_core::{Document, EditError, Heading, PlanningKind, Timestamp};
 use blossom_index::agenda::Agenda;
@@ -34,7 +34,7 @@ use blossom_vault::ops::{Change, HeadingRef};
 use chrono::{Datelike, NaiveDate, NaiveTime};
 use iced::keyboard::{self, Key};
 use iced::theme::Mode;
-use iced::widget::text_editor::{Action, Edit, Motion};
+use iced::widget::text_editor::{Action, Edit};
 use iced::widget::{
     Column, button, column, container, pick_list, row, rule, scrollable, space, text, text_editor,
     text_input,
@@ -42,6 +42,7 @@ use iced::widget::{
 use iced::{Element, Fill, Font, Length, Subscription, Task, Theme, font, window};
 
 use crate::agenda;
+use crate::capture_editor::{self, CaptureEditor};
 use crate::draw::{self, DiagramEditor};
 use crate::editor::{self, Command};
 use crate::file::{DiskCopy, DiskState, Group, OpenFile, SectionEditor, Selected};
@@ -50,7 +51,7 @@ use crate::keys::{self, AppKey};
 use crate::meaning;
 use crate::newfile::{self, NewFile, NewFileMsg};
 use crate::outline;
-use crate::panels::{self, CapturePanel, RefilePicker};
+use crate::panels::{self, RefilePicker};
 use crate::read::{self, Actions, Ink, Picture};
 use crate::search;
 use crate::settings::Settings;
@@ -96,9 +97,7 @@ pub struct App {
     /// The sidebar's "New file" form, when open.
     new_file: Option<NewFile>,
     /// The text of the last kill (C-k, M-d, M-DEL), for C-y.
-    kill_ring: String,
-    /// The last editor command was a kill, so the next one adds to it.
-    kill_append: bool,
+    kill_ring: editor::KillRing,
     /// The file last open in each folder.
     state: State,
     /// Where `state` is saved; `None` in tests.
@@ -155,8 +154,8 @@ pub struct App {
     restarted: Option<(Option<(String, Selected)>, String)>,
     /// The last operation's message, and its changes while it can be undone.
     notice: Option<(String, Option<Vec<Change>>)>,
-    /// The capture panel, while open.
-    capture: Option<CapturePanel>,
+    /// Capture, while open.
+    capture: Option<CaptureEditor>,
     /// A capture or diagram save was sent and its result is awaited.
     awaiting: Awaiting,
     /// The refile picker, while open.
@@ -288,8 +287,6 @@ pub enum Message {
     CaptureTemplate(String),
     /// Capture: answer prompt N.
     CaptureAnswer(usize, String),
-    /// Capture: the editor.
-    CaptureAction(Action),
     /// Capture: save.
     CaptureSave,
     /// Capture: close without saving.
@@ -357,8 +354,7 @@ impl App {
             settings_panel: None,
             sidebar: true,
             new_file: None,
-            kill_ring: String::new(),
-            kill_append: false,
+            kill_ring: editor::KillRing::default(),
             state: State::default(),
             state_path: None,
             choose_start: false,
@@ -739,7 +735,7 @@ impl App {
             Message::EditorAction(_) | Message::EditorCommand(_)
         ) && !matches!(message, Message::EditorCommand(Command::Kill(_)))
         {
-            self.kill_append = false;
+            self.kill_ring.append = false;
         }
         let task = self.update_inner(message);
         self.request_pictures();
@@ -824,7 +820,10 @@ impl App {
                 }
             }
             Message::StartEditing => return self.start_editing(),
-            Message::StopEditing | Message::EditorCommand(Command::Done) => self.stop_editing(),
+            Message::EditorCommand(c) if self.capture.is_some() => return self.capture_command(c),
+            Message::StopEditing | Message::EditorCommand(Command::Done | Command::Save) => {
+                self.stop_editing();
+            }
             Message::EditorAction(action) => self.editor_action(action),
             Message::EditorCommand(Command::Enter) => self.enter(),
             Message::EditorCommand(c @ (Command::Kill(_) | Command::Yank)) => self.kill_or_yank(c),
@@ -915,17 +914,8 @@ impl App {
                     p.expand(&self.template.templates);
                 }
             }
-            Message::CaptureAction(action) => {
-                if let Some(p) = &mut self.capture {
-                    p.edited |= action.is_edit();
-                    p.content.perform(action);
-                }
-            }
             Message::CaptureSave => self.save_capture(),
-            Message::CaptureCancel => {
-                self.capture = None;
-                self.awaiting = Awaiting::Nothing;
-            }
+            Message::CaptureCancel => self.cancel_capture(true),
             Message::StartRefile => return self.start_refile(),
             Message::RefileFilter(f) => {
                 if let Some(r) = &mut self.refile {
@@ -983,7 +973,8 @@ impl App {
                 }
             }
             Message::Pasted(None) => {
-                if self.file.as_ref().is_some_and(|f| f.editor.is_some()) {
+                if self.capture.is_some() || self.file.as_ref().is_some_and(|f| f.editor.is_some())
+                {
                     return iced::clipboard::read().map(Message::PasteText);
                 }
             }
@@ -1569,14 +1560,52 @@ impl App {
     }
 
     fn open_capture(&mut self) -> Task<Message> {
+        // Already open: keep what's typed.
+        if self.capture.is_some() {
+            return iced::widget::operation::focus(capture_editor::EDITOR);
+        }
         if self.template.templates.is_empty() {
             self.status = Some("No capture templates are configured".into());
             return Task::none();
         }
         let now = chrono::Local::now().naive_local();
-        self.capture = Some(CapturePanel::new(&self.template.templates, 0, now));
+        self.capture = Some(CaptureEditor::new(&self.template.templates, 0, now));
         self.awaiting = Awaiting::Nothing;
-        iced::widget::operation::focus(panels::CAPTURE_EDITOR)
+        iced::widget::operation::focus(capture_editor::EDITOR)
+    }
+
+    /// An editor key while capturing.
+    fn capture_command(&mut self, command: Command) -> Task<Message> {
+        match command {
+            Command::Done => self.cancel_capture(false),
+            Command::Save => self.save_capture(),
+            Command::Enter => self.enter(),
+            Command::Kill(_) | Command::Yank => self.kill_or_yank(command),
+            // The entry isn't in a file yet, so there is nothing to attach
+            // an image to: text only.
+            Command::Paste => return iced::clipboard::read().map(Message::PasteText),
+            Command::Undo | Command::Redo => {
+                if let Some(c) = &mut self.capture {
+                    c.undo(command == Command::Redo);
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// Closes capture without saving. Unless `now`, an entry with typing in
+    /// it asks first: the first Escape only warns.
+    fn cancel_capture(&mut self, now: bool) {
+        let Some(c) = &mut self.capture else { return };
+        if self.awaiting == Awaiting::Capture {
+            return;
+        }
+        if !now && c.edited && !c.discard_warned {
+            c.discard_warned = true;
+            return;
+        }
+        self.capture = None;
+        self.awaiting = Awaiting::Nothing;
     }
 
     fn save_capture(&mut self) {
@@ -1830,108 +1859,57 @@ impl App {
     }
 
     fn editor_action(&mut self, action: Action) {
-        let Some(f) = &mut self.file else { return };
-        let is_edit = action.is_edit();
-        let before = if is_edit { f.snapshot() } else { None };
-        let Some(ed) = &mut f.editor else { return };
-        ed.content.perform(action);
-        if is_edit {
-            self.sync_editor(before, Group::Typing);
+        if !action.is_edit() {
+            if let Some(c) = &mut self.capture {
+                c.content.perform(action);
+            } else if let Some(ed) = self.file.as_mut().and_then(|f| f.editor.as_mut()) {
+                ed.content.perform(action);
+            }
+            return;
         }
+        self.edit_text(Group::Typing, |c, _| {
+            c.perform(action);
+            true
+        });
+    }
+
+    /// Runs `change` on the open editor's text (capture's, else the
+    /// section's) and keeps the change when it reports one: an undo step,
+    /// and for a section, the document.
+    fn edit_text(
+        &mut self,
+        group: Group,
+        change: impl FnOnce(&mut iced::widget::text_editor::Content, &mut editor::KillRing) -> bool,
+    ) {
+        let ring = &mut self.kill_ring;
+        if let Some(c) = &mut self.capture {
+            c.edit(group, |content| change(content, ring));
+            return;
+        }
+        let Some(f) = &mut self.file else { return };
+        let before = f.snapshot();
+        let Some(ed) = &mut f.editor else { return };
+        if change(&mut ed.content, ring) {
+            self.sync_editor(before, group);
+        }
+    }
+
+    /// Enter in the editor, continuing or ending a list.
+    fn enter(&mut self) {
+        self.edit_text(Group::Single, |c, _| {
+            editor::enter(c);
+            true
+        });
     }
 
     /// An Emacs kill (the text goes to the kill ring; kills in a row add
     /// up, M-DEL's in front) or C-y (inserts the kill ring's text).
     fn kill_or_yank(&mut self, command: Command) {
-        let Some(f) = &mut self.file else { return };
-        let before = f.snapshot();
-        let Some(ed) = &mut f.editor else { return };
-        let kind = match command {
-            Command::Kill(kind) => kind,
-            Command::Yank => {
-                if !self.kill_ring.is_empty() {
-                    ed.content
-                        .perform(Action::Edit(Edit::Paste(Arc::new(self.kill_ring.clone()))));
-                    self.sync_editor(before, Group::Single);
-                }
-                return;
-            }
-            _ => return,
-        };
-        // A kill ignores the selection, as in Emacs.
-        let cursor = ed.content.cursor();
-        ed.content.move_to(iced::widget::text_editor::Cursor {
-            position: cursor.position,
-            selection: None,
+        self.edit_text(Group::Single, |c, ring| match command {
+            Command::Kill(kind) => editor::kill(c, kind, ring),
+            Command::Yank => editor::yank(c, ring),
+            _ => false,
         });
-        let motion = match kind {
-            editor::Kill::Line => {
-                let line_len = ed
-                    .content
-                    .line(cursor.position.line)
-                    .map_or(0, |l| l.text.len());
-                // At the end of the line, the line break goes.
-                if cursor.position.column >= line_len {
-                    Motion::Right
-                } else {
-                    Motion::End
-                }
-            }
-            editor::Kill::WordForward => Motion::WordRight,
-            editor::Kill::WordBackward => Motion::WordLeft,
-        };
-        ed.content.perform(Action::Select(motion));
-        // iced counts a run of spaces as a word; Emacs kills through it to
-        // the word beyond.
-        if motion != Motion::Right
-            && ed
-                .content
-                .selection()
-                .is_some_and(|s| !s.is_empty() && s.trim().is_empty())
-        {
-            ed.content.perform(Action::Select(motion));
-        }
-        let Some(killed) = ed.content.selection().filter(|s| !s.is_empty()) else {
-            return;
-        };
-        ed.content.perform(Action::Edit(Edit::Delete));
-        if !self.kill_append {
-            self.kill_ring.clear();
-        }
-        if kind == editor::Kill::WordBackward {
-            self.kill_ring.insert_str(0, &killed);
-        } else {
-            self.kill_ring.push_str(&killed);
-        }
-        self.kill_append = true;
-        self.sync_editor(before, Group::Single);
-    }
-
-    /// Enter in the editor, continuing or ending a list.
-    fn enter(&mut self) {
-        let Some(f) = &mut self.file else { return };
-        let before = f.snapshot();
-        let Some(ed) = &mut f.editor else { return };
-        let cursor = ed.content.cursor();
-        let line = ed
-            .content
-            .line(cursor.position.line)
-            .map_or_else(String::new, |l| l.text.into_owned());
-        let at_end = cursor.selection.is_none() && cursor.position.column == line.len();
-        match editing::continue_list(&line).filter(|_| at_end) {
-            Some(ListContinue::Item(prefix)) => {
-                ed.content.perform(Action::Edit(Edit::Enter));
-                ed.content
-                    .perform(Action::Edit(Edit::Paste(Arc::new(prefix))));
-            }
-            Some(ListContinue::End) => {
-                ed.content.perform(Action::Move(Motion::Home));
-                ed.content.perform(Action::Select(Motion::End));
-                ed.content.perform(Action::Edit(Edit::Backspace));
-            }
-            None => ed.content.perform(Action::Edit(Edit::Enter)),
-        }
-        self.sync_editor(before, Group::Single);
     }
 
     /// Splices the editor's text into the document.
@@ -2060,8 +2038,8 @@ impl App {
             if self.refile.take().is_some() {
                 return Task::none();
             }
-            if self.capture.is_some() && self.awaiting != Awaiting::Capture {
-                self.capture = None;
+            if self.capture.is_some() {
+                self.cancel_capture(false);
                 return Task::none();
             }
         }
@@ -2176,7 +2154,7 @@ impl App {
         self.body()
     }
 
-    /// The capture panel or refile picker, when one is open. It takes the
+    /// The Settings panel or refile picker, when one is open. It takes the
     /// main area rather than floating over it: iced's layered `stack` drops
     /// a text editor's text.
     fn panel(&self) -> Option<Element<'_, Message>> {
@@ -2186,18 +2164,7 @@ impl App {
         if let Some(r) = &self.refile {
             return Some(panels::refile_view(r));
         }
-        let p = self.capture.as_ref()?;
-        let keywords = self
-            .file
-            .as_ref()
-            .and_then(|f| f.doc.as_ref())
-            .map_or_else(|| self.template.keywords.clone(), |d| d.keywords().clone());
-        Some(panels::capture_view(
-            p,
-            &self.template.templates,
-            &keywords,
-            &self.settings,
-        ))
+        None
     }
 
     fn body(&self) -> Element<'_, Message> {
@@ -2211,6 +2178,18 @@ impl App {
             self.beside_sidebar(container(draw::view(d)).width(Fill).height(Fill))
         } else if let Some(panel) = self.panel() {
             self.beside_sidebar(container(panel).center(Fill))
+        } else if let Some(c) = &self.capture {
+            let keywords = self
+                .file
+                .as_ref()
+                .and_then(|f| f.doc.as_ref())
+                .map_or_else(|| self.template.keywords.clone(), |d| d.keywords().clone());
+            self.beside_sidebar(capture_editor::view(
+                c,
+                &self.template.templates,
+                &keywords,
+                &self.settings,
+            ))
         } else if self.view == View::Search {
             self.beside_sidebar(
                 container(search::view(
@@ -2256,7 +2235,13 @@ impl App {
                     sidebar: self.sidebar,
                     search: &self.search_input,
                     meaning: self.view == View::Search && self.search_meaning,
-                    agenda: self.view == View::Agenda,
+                    active: if self.capture.is_some() {
+                        topbar::Active::Capture
+                    } else if self.view == View::Agenda {
+                        topbar::Active::Agenda
+                    } else {
+                        topbar::Active::None
+                    },
                 }),
                 rule::horizontal(1),
                 main,
@@ -3184,6 +3169,7 @@ mod tests {
     use super::*;
     use blossom_core::Keywords;
     use blossom_core::render::Block;
+    use iced::widget::text_editor::Motion;
 
     fn app() -> App {
         let template = OpenVault::new(PathBuf::new(), &blossom_vault::config::Config::default());
@@ -3654,21 +3640,58 @@ mod tests {
     }
 
     #[test]
-    fn capture_panel_expands_and_keeps_typing() {
+    fn capture_uses_the_editor_keys_and_asks_before_discarding() {
         let mut a = loaded("* one\n");
         let _ = a.update(Message::OpenCapture);
         let label = |t: &blossom_vault::config::Template| format!("{} — {}", t.key, t.name);
         let todo = label(&a.template.templates[1]);
         let _ = a.update(Message::CaptureTemplate(todo));
-        let p = a.capture.as_ref().unwrap();
-        assert_eq!(p.entry(), "* TODO ");
-        // The cursor is where `%?` was: typing goes there.
-        let _ = a.update(Message::CaptureAction(Action::Edit(Edit::Insert('x'))));
-        let p = a.capture.as_ref().unwrap();
-        assert_eq!(p.entry(), "* TODO x");
-        assert!(p.edited);
-        let _ = a.update(Message::CaptureSave);
+        let entry = |a: &App| a.capture.as_ref().unwrap().entry();
+        assert_eq!(entry(&a), "* TODO ");
+        let _ = a.view();
+        // The cursor is where `%?` was; the editor's messages reach capture,
+        // not the open file.
+        for c in "buy milk".chars() {
+            let _ = a.update(Message::EditorAction(Action::Edit(Edit::Insert(c))));
+        }
+        assert_eq!(entry(&a), "* TODO buy milk");
+        assert_eq!(text_of(&a), "* one\n");
+        // M-DEL kills a word, C-y yanks it back, undo steps back.
+        let _ = a.update(Message::EditorCommand(Command::Kill(
+            editor::Kill::WordBackward,
+        )));
+        assert_eq!(entry(&a), "* TODO buy ");
+        let _ = a.update(Message::EditorCommand(Command::Yank));
+        assert_eq!(entry(&a), "* TODO buy milk");
+        let _ = a.update(Message::EditorCommand(Command::Undo));
+        assert_eq!(entry(&a), "* TODO buy ");
+        let _ = a.update(Message::EditorCommand(Command::Redo));
+        assert_eq!(entry(&a), "* TODO buy milk");
+        // Esc once warns, typing clears the warning, Esc twice discards.
+        let _ = a.update(Message::EditorCommand(Command::Done));
+        assert!(a.capture.as_ref().unwrap().discard_warned);
+        let _ = a.view();
+        let _ = a.update(Message::EditorAction(Action::Edit(Edit::Insert('!'))));
+        assert!(!a.capture.as_ref().unwrap().discard_warned);
+        let _ = a.update(Message::EditorCommand(Command::Done));
+        assert!(a.capture.is_some());
+        // Capture again while open keeps the entry.
+        let _ = a.update(Message::OpenCapture);
+        assert!(a.capture.as_ref().unwrap().edited);
+        let _ = a.update(Message::EditorCommand(Command::Done));
+        assert!(a.capture.is_none());
+        // An untouched entry goes at the first Esc.
+        let _ = a.update(Message::OpenCapture);
+        let _ = a.update(Message::EditorCommand(Command::Done));
+        assert!(a.capture.is_none());
+        // Ctrl+Enter saves; a failed save keeps the entry.
+        let _ = a.update(Message::OpenCapture);
+        let _ = a.update(Message::EditorAction(Action::Edit(Edit::Insert('x'))));
+        let _ = a.update(Message::EditorCommand(Command::Save));
         assert_eq!(a.awaiting, Awaiting::Capture);
+        // Esc while it saves does nothing.
+        let _ = a.update(Message::EditorCommand(Command::Done));
+        assert!(a.capture.is_some());
         let _ = a.update(Message::Worker(Event::Error("disk full".into())));
         assert!(a.capture.is_some() && a.awaiting == Awaiting::Nothing);
         let _ = a.update(Message::CaptureCancel);
@@ -3725,7 +3748,7 @@ mod tests {
         kill(&mut a, Kill::Line);
         kill(&mut a, Kill::Line);
         assert_eq!(text_of(&a), "* one\n\n* two\n");
-        assert_eq!(a.kill_ring, "alpha beta\ngamma");
+        assert_eq!(a.kill_ring.text, "alpha beta\ngamma");
         // Moving ends the run: a new kill replaces it. M-d kills to the
         // end of the word.
         // C-y where it was killed puts it back.
@@ -3735,16 +3758,16 @@ mod tests {
         go(&mut a, Motion::Down);
         kill(&mut a, Kill::WordForward);
         assert_eq!(text_of(&a), "* one\n beta\ngamma\n* two\n");
-        assert_eq!(a.kill_ring, "alpha");
+        assert_eq!(a.kill_ring.text, "alpha");
         // M-d again kills through the space to the next word's end.
         kill(&mut a, Kill::WordForward);
-        assert_eq!(a.kill_ring, "alpha beta");
+        assert_eq!(a.kill_ring.text, "alpha beta");
         let _ = a.update(Message::EditorCommand(Command::Yank));
         // M-DEL twice from the line's end: both words, in their order.
         go(&mut a, Motion::End);
         kill(&mut a, Kill::WordBackward);
         kill(&mut a, Kill::WordBackward);
-        assert_eq!(a.kill_ring, "alpha beta");
+        assert_eq!(a.kill_ring.text, "alpha beta");
         assert_eq!(text_of(&a), "* one\n\ngamma\n* two\n");
         // Undo brings the kill back.
         let _ = a.update(Message::EditorCommand(Command::Undo));

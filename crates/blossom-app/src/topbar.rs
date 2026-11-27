@@ -74,8 +74,19 @@ pub struct Bar<'a> {
     pub search: &'a str,
     /// The search screen is showing, by meaning.
     pub meaning: bool,
-    /// The agenda is showing.
-    pub agenda: bool,
+    /// The screen whose icon is highlighted, if any.
+    pub active: Active,
+}
+
+/// The screen a top bar icon stands for, when it shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Active {
+    /// Neither.
+    None,
+    /// The agenda.
+    Agenda,
+    /// Capture.
+    Capture,
 }
 
 /// One icon button with its label or hint.
@@ -181,7 +192,7 @@ pub fn view(bar: &Bar<'_>) -> Element<'static, Message> {
                 "Agenda",
                 format!("Agenda ({})", AppKey::Agenda.hint()),
                 Message::ShowAgenda,
-                bar.agenda,
+                bar.active == Active::Agenda,
             ),
             item(
                 labels,
@@ -189,7 +200,7 @@ pub fn view(bar: &Bar<'_>) -> Element<'static, Message> {
                 "Capture",
                 format!("Capture a note ({})", AppKey::Capture.hint()),
                 Message::OpenCapture,
-                false,
+                bar.active == Active::Capture,
             ),
             item(
                 labels,

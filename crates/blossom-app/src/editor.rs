@@ -2,12 +2,14 @@
 //! [`blossom_core::highlight`], plus the editor's key bindings.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use blossom_core::Keywords;
+use blossom_core::editing::{self, ListContinue};
 use blossom_core::highlight::{self, Kind, LineState};
 use iced::advanced::text::highlighter::{self, Format};
 use iced::keyboard::{self, Key, key};
-use iced::widget::text_editor::{Binding, KeyPress};
+use iced::widget::text_editor::{Action, Binding, Content, Cursor, Edit, KeyPress, Motion};
 use iced::{Color, Font, Theme, font};
 
 use crate::style;
@@ -140,8 +142,10 @@ pub enum Command {
     Undo,
     /// Redo.
     Redo,
-    /// Leave the editor.
+    /// Esc: leave the editor (capture: discard the entry).
     Done,
+    /// Ctrl/Cmd+Enter: leave the editor (capture: file the entry).
+    Save,
     /// Enter, with list continuation.
     Enter,
     /// Ctrl/Cmd+V: an image on the clipboard is attached, text is pasted.
@@ -200,7 +204,6 @@ fn binding_char(press: &KeyPress) -> Option<char> {
 /// C-k, C-y, M-f/b, M-d, M-DEL and M-</M->. Ctrl is Control on macOS too
 /// (Cmd keeps its own keys); Meta is Alt or Option.
 fn emacs<M>(press: &KeyPress, on: fn(Command) -> M) -> Option<Binding<M>> {
-    use iced::widget::text_editor::Motion;
     let m = press.modifiers;
     let ctrl = m.control() && !m.alt() && !m.logo() && !m.shift();
     let meta = m.alt() && !m.control() && !m.logo();
@@ -231,8 +234,8 @@ fn emacs<M>(press: &KeyPress, on: fn(Command) -> M) -> Option<Binding<M>> {
 }
 
 /// The editor's key bindings: the app's shortcuts pass through, then
-/// iced's defaults plus undo/redo, paste (an image too), Escape to leave
-/// and Enter for list continuation; with `emacs`, the Emacs keys first
+/// iced's defaults plus undo/redo, paste (an image too), Escape to leave,
+/// Ctrl/Cmd+Enter to save and Enter for list continuation; with `emacs`, the Emacs keys first
 /// (then C-y yanks, and redo is Ctrl+Shift+Z).
 pub fn bindings<M>(
     on: fn(Command) -> M,
@@ -271,6 +274,9 @@ pub fn bindings<M>(
                 return Some(Binding::Custom(on(Command::Paste)));
             }
             Key::Named(key::Named::Escape) => return Some(Binding::Custom(on(Command::Done))),
+            Key::Named(key::Named::Enter) if m.command() && !m.shift() && !m.alt() => {
+                return Some(Binding::Custom(on(Command::Save)));
+            }
             Key::Named(key::Named::Enter) if m == keyboard::Modifiers::empty() => {
                 return Some(Binding::Custom(on(Command::Enter)));
             }
@@ -280,23 +286,94 @@ pub fn bindings<M>(
     }
 }
 
-/// The capture editor's bindings: iced's defaults, Ctrl/Cmd+Enter to save
-/// and Escape to cancel.
-pub fn capture_bindings<M: Clone>(save: M, cancel: M) -> impl Fn(KeyPress) -> Option<Binding<M>> {
-    move |press: KeyPress| {
-        if !matches!(
-            press.status,
-            iced::widget::text_editor::Status::Focused { .. }
-        ) {
-            return None;
-        }
-        match press.key.as_ref() {
-            Key::Named(key::Named::Enter) if press.modifiers.command() => {
-                Some(Binding::Custom(save.clone()))
+/// The kill ring: the last kill, and whether the next kill adds to it
+/// (kills in a row do; anything else in the editor ends the run).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KillRing {
+    /// The killed text.
+    pub text: String,
+    /// The next kill adds to `text`.
+    pub append: bool,
+}
+
+/// An Emacs kill in `content`: the text goes to `ring` (kills in a row add
+/// up, M-DEL's in front). Whether anything was killed.
+pub fn kill(content: &mut Content, kind: Kill, ring: &mut KillRing) -> bool {
+    // A kill ignores the selection, as in Emacs.
+    let cursor = content.cursor();
+    content.move_to(Cursor {
+        position: cursor.position,
+        selection: None,
+    });
+    let motion = match kind {
+        Kill::Line => {
+            let line_len = content
+                .line(cursor.position.line)
+                .map_or(0, |l| l.text.len());
+            // At the end of the line, the line break goes.
+            if cursor.position.column >= line_len {
+                Motion::Right
+            } else {
+                Motion::End
             }
-            Key::Named(key::Named::Escape) => Some(Binding::Custom(cancel.clone())),
-            _ => Binding::from_key_press(press),
         }
+        Kill::WordForward => Motion::WordRight,
+        Kill::WordBackward => Motion::WordLeft,
+    };
+    content.perform(Action::Select(motion));
+    // iced counts a run of spaces as a word; Emacs kills through it to the
+    // word beyond.
+    if motion != Motion::Right
+        && content
+            .selection()
+            .is_some_and(|s| !s.is_empty() && s.trim().is_empty())
+    {
+        content.perform(Action::Select(motion));
+    }
+    let Some(killed) = content.selection().filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    content.perform(Action::Edit(Edit::Delete));
+    if !ring.append {
+        ring.text.clear();
+    }
+    if kind == Kill::WordBackward {
+        ring.text.insert_str(0, &killed);
+    } else {
+        ring.text.push_str(&killed);
+    }
+    ring.append = true;
+    true
+}
+
+/// C-y: inserts the last kill; whether there was one.
+pub fn yank(content: &mut Content, ring: &KillRing) -> bool {
+    if ring.text.is_empty() {
+        return false;
+    }
+    content.perform(Action::Edit(Edit::Paste(Arc::new(ring.text.clone()))));
+    true
+}
+
+/// Enter, continuing a list (`- `, `1. `, `- [ ] `) at the end of an
+/// item's line, or ending it on an empty item.
+pub fn enter(content: &mut Content) {
+    let cursor = content.cursor();
+    let line = content
+        .line(cursor.position.line)
+        .map_or_else(String::new, |l| l.text.into_owned());
+    let at_end = cursor.selection.is_none() && cursor.position.column == line.len();
+    match editing::continue_list(&line).filter(|_| at_end) {
+        Some(ListContinue::Item(prefix)) => {
+            content.perform(Action::Edit(Edit::Enter));
+            content.perform(Action::Edit(Edit::Paste(Arc::new(prefix))));
+        }
+        Some(ListContinue::End) => {
+            content.perform(Action::Move(Motion::Home));
+            content.perform(Action::Select(Motion::End));
+            content.perform(Action::Edit(Edit::Backspace));
+        }
+        None => content.perform(Action::Edit(Edit::Enter)),
     }
 }
 

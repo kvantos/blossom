@@ -14,10 +14,10 @@ use blossom_vault::Revision;
 use iced::widget::text_editor::{Content, Cursor, Position};
 
 /// Undo keeps this many steps.
-const UNDO_LIMIT: usize = 200;
+pub(crate) const UNDO_LIMIT: usize = 200;
 
 /// Keystrokes closer together than this undo as one step.
-const TYPING_GROUP: Duration = Duration::from_secs(1);
+pub(crate) const TYPING_GROUP: Duration = Duration::from_secs(1);
 
 /// What the read view shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
