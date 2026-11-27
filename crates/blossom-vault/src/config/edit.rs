@@ -82,6 +82,9 @@ pub const TEMPLATE: &str = r#"# Blossom's settings, read by the app and by `blsm
 # The editor's size in pixels, 10 to 28.
 # editor_size = 14
 
+# Names in the top bar: none (icons only, a hint on hover), below or beside the icons.
+# top_bar_labels = "none"
+
 [semantic]
 # Search by meaning: english (built in), multilingual (built in, downloaded
 # on first use) or server (an OpenAI-compatible server such as Ollama).

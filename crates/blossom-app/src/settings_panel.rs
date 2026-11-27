@@ -17,6 +17,7 @@ use crate::meaning::Status;
 use crate::search;
 use crate::settings::{self, Settings};
 use crate::style::{self, Colours, ModeChoice};
+use crate::topbar::Labels;
 
 /// A section of the panel.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -141,6 +142,8 @@ pub enum Setting {
     EditorFont(Choice),
     /// The editor's size.
     EditorSize(u32),
+    /// Where the top bar's labels go.
+    Labels(Labels),
     /// How search by meaning works.
     Model(ModelChoice),
     /// The server address field.
@@ -287,6 +290,14 @@ fn appearance<'a>(s: &'a Settings, installed: Option<&Installed>) -> Element<'a,
             .text_size(14)
             .into()
     });
+    let labels = Labels::ALL.map(|l| {
+        radio(l.label(), l, Some(s.top_bar_labels), |l| {
+            send(Setting::Labels(l))
+        })
+        .size(16)
+        .text_size(14)
+        .into()
+    });
     column![
         heading("Colours"),
         Column::from_iter(colours).spacing(8),
@@ -313,6 +324,8 @@ fn appearance<'a>(s: &'a Settings, installed: Option<&Installed>) -> Element<'a,
             s.editor_size,
             Setting::EditorSize
         ),
+        heading("Top bar"),
+        Column::from_iter(labels).spacing(8),
     ]
     .spacing(10)
     .into()

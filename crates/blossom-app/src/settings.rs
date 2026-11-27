@@ -13,6 +13,7 @@ use serde::de::{DeserializeOwned, IntoDeserializer as _};
 use serde::{Deserialize, Serialize};
 
 use crate::style::{Colours, ModeChoice};
+use crate::topbar::Labels;
 
 /// The font sizes on offer, in pixels.
 pub const SIZES: RangeInclusive<u32> = 10..=28;
@@ -38,6 +39,8 @@ pub struct Settings {
     pub editor_font: Option<String>,
     /// The editor's size in pixels.
     pub editor_size: u32,
+    /// Where the top bar's labels go.
+    pub top_bar_labels: Labels,
 }
 
 impl Default for Settings {
@@ -49,6 +52,7 @@ impl Default for Settings {
             read_size: 15,
             editor_font: None,
             editor_size: 14,
+            top_bar_labels: Labels::default(),
         }
     }
 }
@@ -107,6 +111,13 @@ impl Settings {
             "system, light or dark",
         )
         .unwrap_or(d.mode);
+        let top_bar_labels = choose(
+            &mut problems,
+            "top_bar_labels",
+            config.top_bar_labels.as_ref(),
+            "none, below or beside",
+        )
+        .unwrap_or(d.top_bar_labels);
         let font = |f: &Option<String>| {
             f.as_deref()
                 .map(str::trim)
@@ -136,6 +147,7 @@ impl Settings {
                 read_size,
                 editor_font: font(&config.editor_font),
                 editor_size,
+                top_bar_labels,
             },
             problems,
         )
@@ -167,6 +179,13 @@ impl Settings {
         }
         if self.editor_size != old.editor_size {
             out.push(Change::set(TABLE, "editor_size", self.editor_size));
+        }
+        if self.top_bar_labels != old.top_bar_labels {
+            out.push(Change::set(
+                TABLE,
+                "top_bar_labels",
+                name(self.top_bar_labels),
+            ));
         }
         out
     }
@@ -251,6 +270,7 @@ mod tests {
             editor_font: Some(String::new()),
             read_size: Some(99),
             editor_size: Some(16),
+            top_bar_labels: Some("beside".into()),
         });
         assert_eq!(
             s,
@@ -261,6 +281,7 @@ mod tests {
                 read_size: 28,
                 editor_font: None,
                 editor_size: 16,
+                top_bar_labels: Labels::Beside,
             }
         );
         assert_eq!(problems.len(), 1, "{problems:?}");
@@ -285,6 +306,7 @@ mod tests {
             read_size: 18,
             editor_font: Some("Fira Code".into()),
             editor_size: 12,
+            top_bar_labels: Labels::Below,
         };
         blossom_vault::config::edit::apply(&path, &s.changes_from(&d)).unwrap();
         assert_eq!(

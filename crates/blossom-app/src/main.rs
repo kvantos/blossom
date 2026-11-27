@@ -22,6 +22,7 @@ mod settings;
 mod settings_panel;
 mod shot;
 mod style;
+mod topbar;
 mod tree;
 mod worker;
 

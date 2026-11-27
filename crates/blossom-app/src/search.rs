@@ -1,5 +1,5 @@
-//! The search screen: a query field (plain words, or Orgzly filters such as
-//! `i.todo t.work`), then the matching headings grouped by file, in the
+//! The search screen, for the query in the top bar's field (plain words, or
+//! Orgzly filters such as `i.todo t.work`): the "By meaning" switch, then the matching headings grouped by file, in the
 //! index's rank order. Plain words also find a file's intro (the text
 //! before its first heading, or all of a file without headings), shown
 //! first in its file's group. A result found by its body shows the line
@@ -11,9 +11,7 @@
 //! headings, or what went wrong.
 
 use blossom_index::{Note, Query};
-use iced::widget::{
-    Column, button, column, progress_bar, row, scrollable, text, text_input, toggler,
-};
+use iced::widget::{Column, Space, button, column, progress_bar, row, scrollable, text, toggler};
 use iced::{Element, Fill};
 
 use crate::app::{Message, bold, chip, dim};
@@ -21,7 +19,7 @@ use crate::meaning::Status;
 use crate::style::{self, Chip};
 use crate::worker::SearchResults;
 
-/// The query field's widget id, for focusing.
+/// The query field's widget id (in the top bar), for focusing.
 pub const INPUT: &str = "search-input";
 
 /// Results shown at most; the rest are counted.
@@ -55,25 +53,16 @@ pub fn view<'a>(
     status: Option<&'a Status>,
     results: Option<&'a SearchResults>,
 ) -> Element<'a, Message> {
-    let field = text_input(
-        if meaning {
-            "Describe what you're looking for…"
-        } else {
-            "Search your notes…"
-        },
-        input,
-    )
-    .id(INPUT)
-    .on_input(Message::SearchInput)
-    .size(15)
-    .padding([6, 10]);
     let switch = toggler(meaning)
         .label("By meaning")
         .on_toggle(Message::SearchMeaning)
         .text_size(13)
         .size(18);
-    let mut parts: Vec<Element<'a, Message>> =
-        vec![row![field, switch].spacing(14).align_y(iced::Center).into()];
+    let mut parts: Vec<Element<'a, Message>> = vec![
+        row![Space::new().width(Fill), switch]
+            .align_y(iced::Center)
+            .into(),
+    ];
     if meaning {
         meaning_view(input, status, results, &mut parts);
     } else if input.trim().is_empty() {

@@ -56,6 +56,9 @@ pub struct AppearanceConfig {
     pub editor_font: Option<String>,
     /// The editor's size in pixels.
     pub editor_size: Option<u32>,
+    /// The top bar's labels: `none` (default; a hint on hover), `below` or
+    /// `beside` the icons.
+    pub top_bar_labels: Option<String>,
 }
 
 /// The `[semantic]` table. Every field is optional; with none, search by

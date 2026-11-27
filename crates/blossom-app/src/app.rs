@@ -56,6 +56,7 @@ use crate::settings_panel::{self, Setting};
 use crate::shot;
 use crate::style::Colours;
 use crate::style::{self, Chip};
+use crate::topbar;
 use crate::tree::{self, FileInfo};
 use crate::worker::{self, Event, Handle, Op, OpenVault, Request, SearchResults};
 use blossom_vault::config::{self, Config, edit};
@@ -87,6 +88,8 @@ pub struct App {
     config_path: Option<PathBuf>,
     /// The Settings panel, when open.
     settings_panel: Option<settings_panel::Panel>,
+    /// The sidebar is shown.
+    sidebar: bool,
     /// The installed fonts, once read for the Settings panel.
     fonts: Option<Arc<fonts::Installed>>,
     worker: Option<Handle>,
@@ -260,6 +263,8 @@ pub enum Message {
     OpenCapture,
     /// The Settings panel.
     Setting(Setting),
+    /// Show or hide the sidebar.
+    ToggleSidebar,
     /// Capture: choose a template, by its label.
     CaptureTemplate(String),
     /// Capture: answer prompt N.
@@ -331,6 +336,7 @@ impl App {
             config,
             config_path,
             settings_panel: None,
+            sidebar: true,
             fonts: None,
             worker: None,
             vault_exists: open.is_some() || typed_folder_exists(DEFAULT_FOLDER),
@@ -488,6 +494,7 @@ impl App {
             Setting::ReadSize(n) => new.read_size = n,
             Setting::EditorFont(f) => new.editor_font = f.0,
             Setting::EditorSize(n) => new.editor_size = n,
+            Setting::Labels(l) => new.top_bar_labels = l,
         }
         self.set_settings(new);
         Task::none()
@@ -549,6 +556,19 @@ impl App {
         {
             self.status = Some(format!("Couldn't save the appearance settings: {e}"));
         }
+    }
+
+    /// The top bar's search field changed: show the search screen for it.
+    fn search_typed(&mut self, input: String) {
+        self.view = View::Search;
+        self.search_input = input;
+        self.send_search();
+    }
+
+    /// Opens a folder chosen in the app, and remembers it for next time.
+    fn open_chosen(&mut self, root: PathBuf) {
+        self.remember_vault(&root);
+        self.open_folder(root);
     }
 
     /// Writes a folder opened from the GUI to the config as `vault`, so the
@@ -668,16 +688,14 @@ impl App {
             Message::Worker(event) => return self.on_worker(event),
             Message::Mode(mode) => self.system = mode,
             Message::Setting(m) => return self.on_setting(m),
+            Message::ToggleSidebar => self.sidebar = !self.sidebar,
             Message::VaultInput(s) => {
                 self.vault_input = s;
                 self.vault_exists = typed_folder_exists(&self.vault_input);
             }
             Message::ConfigChanged => self.reload_config(),
             Message::OpenTyped => match create_folder(&self.vault_input) {
-                Ok(Some(root)) => {
-                    self.remember_vault(&root);
-                    self.open_folder(root);
-                }
+                Ok(Some(root)) => self.open_chosen(root),
                 Ok(None) => {}
                 Err(e) => self.status = Some(e),
             },
@@ -693,10 +711,7 @@ impl App {
                     Message::Picked,
                 );
             }
-            Message::Picked(Some(root)) => {
-                self.remember_vault(&root);
-                self.open_folder(root);
-            }
+            Message::Picked(Some(root)) => self.open_chosen(root),
             Message::Picked(None) => {}
             Message::ToggleFolder(path) => {
                 if !self.collapsed_folders.remove(&path) {
@@ -781,10 +796,7 @@ impl App {
                 self.send_search();
                 return iced::widget::operation::focus(search::INPUT);
             }
-            Message::SearchInput(s) => {
-                self.search_input = s;
-                self.send_search();
-            }
+            Message::SearchInput(s) => self.search_typed(s),
             Message::SearchMeaning(on) => {
                 self.search_meaning = on;
                 self.send_search();
@@ -1885,6 +1897,7 @@ impl App {
             }
             Key::Character(c) if c.eq_ignore_ascii_case("n") => return self.open_capture(),
             Key::Character(",") => return self.on_setting(Setting::Open),
+            Key::Character("\\") => self.sidebar = !self.sidebar,
             Key::Character(c) if c.eq_ignore_ascii_case("v") && !modifiers.shift() => {
                 return paste();
             }
@@ -2036,22 +2049,41 @@ impl App {
                     .height(Fill),
             )
         } else {
-            row![
-                container(self.sidebar())
-                    .width(240)
-                    .height(Fill)
-                    .style(style::pane),
-                rule::vertical(1),
-                container(self.outline())
-                    .width(Length::FillPortion(2))
-                    .height(Fill),
-                rule::vertical(1),
-                container(self.reader())
-                    .width(Length::FillPortion(3))
-                    .height(Fill),
+            self.beside_sidebar(
+                row![
+                    container(self.outline())
+                        .width(Length::FillPortion(2))
+                        .height(Fill),
+                    rule::vertical(1),
+                    container(self.reader())
+                        .width(Length::FillPortion(3))
+                        .height(Fill),
+                ]
+                .height(Fill),
+            )
+        };
+        self.framed(main)
+    }
+
+    /// `main` under the top bar (once a folder is open), with the notice
+    /// and status lines below.
+    fn framed<'a>(&'a self, main: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+        let main = main.into();
+        let main: Element<'_, Message> = if self.root.is_some() {
+            column![
+                topbar::view(&topbar::Bar {
+                    labels: self.settings.top_bar_labels,
+                    sidebar: self.sidebar,
+                    search: &self.search_input,
+                    meaning: self.view == View::Search && self.search_meaning,
+                    agenda: self.view == View::Agenda,
+                }),
+                rule::horizontal(1),
+                main,
             ]
-            .height(Fill)
             .into()
+        } else {
+            main
         };
         let mut body = column![main];
         if let Some((msg, undo)) = &self.notice {
@@ -2136,6 +2168,9 @@ impl App {
 
     /// The sidebar, a divider, then `pane`.
     fn beside_sidebar<'a>(&'a self, pane: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+        if !self.sidebar {
+            return pane.into();
+        }
         row![
             container(self.sidebar())
                 .width(240)
@@ -2216,32 +2251,8 @@ impl App {
                 bottom: 8.0,
                 left: 12.0
             }),
-            column![
-                button(text("Agenda").size(14))
-                    .on_press(Message::ShowAgenda)
-                    .width(Fill)
-                    .padding([4, 12])
-                    .style(style::row(self.view == View::Agenda)),
-                button(text("Search").size(14))
-                    .on_press(Message::ShowSearch)
-                    .width(Fill)
-                    .padding([4, 12])
-                    .style(style::row(self.view == View::Search)),
-                button(text("Capture…").size(14))
-                    .on_press(Message::OpenCapture)
-                    .width(Fill)
-                    .padding([4, 12])
-                    .style(style::row(false)),
-            ]
-            .spacing(1)
-            .padding([0, 6]),
             rule::horizontal(1),
             scrollable(Column::with_children(rows).spacing(1).padding([6, 6])).height(Fill),
-            rule::horizontal(1),
-            button(text("Settings…").size(12))
-                .on_press(Message::Setting(Setting::Open))
-                .padding([6, 12])
-                .style(button::text),
         ]
         .into()
     }
@@ -3096,6 +3107,23 @@ mod tests {
             "http://box:11434/v1"
         );
         assert!(a.settings_view().is_some());
+    }
+
+    #[test]
+    fn the_top_bar_searches_and_hides_the_sidebar() {
+        let mut a = app();
+        a.root = Some(PathBuf::from("/v"));
+        assert!(a.sidebar);
+        let _ = a.update(Message::ToggleSidebar);
+        assert!(!a.sidebar);
+        let _ = a.view();
+        let _ = a.update(Message::ToggleSidebar);
+        assert!(a.sidebar);
+        // Typing in the field shows the search screen for it.
+        assert_eq!(a.view, View::Files);
+        let _ = a.update(Message::SearchInput("t.work".into()));
+        assert_eq!((a.view, a.search_input.as_str()), (View::Search, "t.work"));
+        let _ = a.view();
     }
 
     #[test]
