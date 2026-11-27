@@ -15,6 +15,10 @@
 //! | Settings     | Ctrl+,       | ⌘,    |
 //! | Sidebar      | Ctrl+\       | ⌘\    |
 //! | Undo / redo  | Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y) | ⌘Z / ⇧⌘Z |
+//! | Quit         | Ctrl+Q       | ⌘Q    |
+//!
+//! Quit is plain Ctrl+Q on Linux, as in most Linux apps; the editor has no
+//! use for it (Emacs's C-q isn't one of its keys).
 
 use iced::keyboard::key::Physical;
 use iced::keyboard::{Key, Modifiers};
@@ -32,6 +36,7 @@ pub enum AppKey {
     Sidebar,
     Undo,
     Redo,
+    Quit,
 }
 
 impl AppKey {
@@ -57,6 +62,7 @@ impl AppKey {
             AppKey::Sidebar => (false, "\\"),
             AppKey::Undo => (false, "Z"),
             AppKey::Redo => (true, "Z"),
+            AppKey::Quit => (false, "Q"),
         };
         shortcut(shift, key)
     }
@@ -100,6 +106,7 @@ pub fn app_key(key: &Key, physical: Physical, m: Modifiers) -> Option<AppKey> {
         ('\\', false) => AppKey::Sidebar,
         ('z', false) => AppKey::Undo,
         ('z', true) | ('y', false) => AppKey::Redo,
+        ('q', false) => AppKey::Quit,
         _ => return None,
     })
 }
@@ -134,6 +141,8 @@ mod tests {
         assert_eq!(k("\\", ctrl), Some(AppKey::Sidebar));
         assert_eq!(k("z", ctrl), Some(AppKey::Undo));
         assert_eq!(k("y", ctrl), Some(AppKey::Redo));
+        assert_eq!(k("q", ctrl), Some(AppKey::Quit));
+        assert_eq!(k("Q", both), None);
         // Plain Ctrl letters are the editor's.
         for c in ["n", "e", "o", "v", "a", "f"] {
             assert_eq!(k(c, ctrl), None, "{c}");

@@ -1398,6 +1398,7 @@ impl App {
                 if let Some(open) = self.pending.take() {
                     handle.send(Request::Open(open));
                 }
+                crate::quit::set_worker(&handle);
                 self.worker = Some(handle);
             }
             Event::Opened(root) => self.on_opened(root),
@@ -2258,7 +2259,8 @@ impl App {
         let Some(action) = keys::app_key(key, *physical_key, *modifiers) else {
             return Task::none();
         };
-        if self.capture.is_some() || self.refile.is_some() || (editing && !action.in_editor()) {
+        let busy = self.capture.is_some() || self.refile.is_some();
+        if action != AppKey::Quit && (busy || (editing && !action.in_editor())) {
             return Task::none();
         }
         match action {
@@ -2270,6 +2272,7 @@ impl App {
             AppKey::Capture => return self.open_capture(),
             AppKey::Settings => return self.on_setting(Setting::Open),
             AppKey::Sidebar => self.sidebar = !self.sidebar,
+            AppKey::Quit => return self.close(),
             AppKey::PasteImage => return paste(),
             AppKey::Agenda => return self.update(Message::ShowAgenda),
             AppKey::Search => return self.update(Message::ShowSearch),

@@ -139,7 +139,8 @@ app back to the same file without touching your comments.
 
 On Linux the app's own keys take Ctrl+Shift, so plain Ctrl keys are free
 for editing (Emacs keys such as Ctrl+A, Ctrl+E and Ctrl+K are on by default;
-**Settings → Editor** turns them off). On macOS they take ⌘.
+**Settings → Editor** turns them off). On macOS they take ⌘. Quitting
+(Ctrl+Q, ⌘Q or closing the window) writes every unsaved edit first.
 
 | Action             | Linux            | macOS |
 |--------------------|------------------|-------|
@@ -152,6 +153,7 @@ for editing (Emacs keys such as Ctrl+A, Ctrl+E and Ctrl+K are on by default;
 | Settings           | Ctrl+,           | ⌘,    |
 | Show/hide sidebar  | Ctrl+\\          | ⌘\\    |
 | Undo / redo        | Ctrl+Z / Ctrl+Shift+Z | ⌘Z / ⇧⌘Z |
+| Quit               | Ctrl+Q           | ⌘Q    |
 
 ## Licence
 

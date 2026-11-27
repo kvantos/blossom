@@ -21,6 +21,7 @@ mod meaning;
 mod newfile;
 mod outline;
 mod panels;
+mod quit;
 mod read;
 mod search;
 mod settings;
@@ -98,6 +99,8 @@ fn main() -> iced::Result {
         );
         return Ok(());
     }
+    // ⌘Q on macOS ends the process without asking the app: save first.
+    quit::install();
     let config_path = config::default_path();
     let config = load_config(config_path.as_deref());
     let template = OpenVault::new(PathBuf::new(), &config);

@@ -322,6 +322,14 @@ impl Handle {
     pub fn send(&self, request: Request) {
         let _ = self.0.send(Input::Request(request));
     }
+
+    /// Writes every waiting save now and waits for that, at most
+    /// `timeout`. Whether the worker confirmed it (`false` when it is gone
+    /// or too slow).
+    pub fn flush_now(&self, timeout: Duration) -> bool {
+        let (tx, rx) = mpsc::channel();
+        self.0.send(Input::FlushNow(tx)).is_ok() && rx.recv_timeout(timeout).is_ok()
+    }
 }
 
 /// The requests sent through a [`Handle::recording`].
@@ -365,6 +373,9 @@ enum Input {
     Changed(u64),
     /// An event from the meaning thread of the vault opened as `generation`.
     Meaning(u64, Event),
+    /// Write every waiting save now, then say so here (the app is exiting
+    /// and can't wait for an event).
+    FlushNow(Sender<()>),
 }
 
 /// The subscription that starts the worker and relays its events. A new
@@ -452,6 +463,22 @@ impl Drop for Open {
     }
 }
 
+/// Writes every waiting save now. For the app's Flush request it also
+/// keeps the search vectors and answers [`Event::Flushed`]; at exit
+/// (`done`) it only writes, then says so.
+fn flush(open: Option<&mut Open>, done: Option<&Sender<()>>, emit: &mut dyn FnMut(Event)) {
+    if let Some(o) = open {
+        write_due(o, far_future(), emit);
+        if done.is_none() {
+            save_vectors(o);
+        }
+    }
+    match done {
+        Some(d) => drop(d.send(())),
+        None => emit(Event::Flushed),
+    }
+}
+
 /// The worker loop: runs until the UI side goes away.
 fn run(inbox: &Receiver<Input>, myself: &Sender<Input>, emit: &mut dyn FnMut(Event)) {
     let mut open: Option<Open> = None;
@@ -512,13 +539,8 @@ fn run(inbox: &Receiver<Input>, myself: &Sender<Input>, emit: &mut dyn FnMut(Eve
                     );
                 }
             }
-            Input::Request(Request::Flush) => {
-                if let Some(o) = open.as_mut() {
-                    write_due(o, far_future(), emit);
-                    save_vectors(o);
-                }
-                emit(Event::Flushed);
-            }
+            Input::Request(Request::Flush) => flush(open.as_mut(), None, emit),
+            Input::FlushNow(done) => flush(open.as_mut(), Some(&done), emit),
             Input::Request(r) => {
                 if let Some(o) = open.as_mut() {
                     handle_other(o, r, loaded.as_deref(), emit);
@@ -1231,6 +1253,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_exit_hook_writes_waiting_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, vault) = opened(dir.path(), &[("a.org", "* one\n")]);
+        h.send(Request::Load("a.org".into()));
+        let base = h.wait(|e| match e {
+            Event::Document(_, _, r) => Some(r),
+            _ => None,
+        });
+        h.send(Request::Save {
+            path: "a.org".into(),
+            text: Arc::new("* one\n* typed just now\n".into()),
+            base: Some(base),
+        });
+        // Not written yet: a save waits for typing to pause.
+        let read = || fs::read_to_string(vault.join("a.org")).unwrap();
+        assert_eq!(read(), "* one\n");
+        crate::quit::set_worker(&Handle(h.tx.clone()));
+        assert!(crate::quit::flush());
+        assert_eq!(read(), "* one\n* typed just now\n");
+        // A worker that stopped answers nothing; the hook doesn't wait.
+        let (gone, rx) = mpsc::channel();
+        drop(rx);
+        assert!(!Handle(gone).flush_now(Duration::from_secs(5)));
     }
 
     #[test]

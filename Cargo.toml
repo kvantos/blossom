@@ -48,7 +48,9 @@ toml_edit = "0.25"
 
 # Strict lints for our own crates. The vendored orgize fork does not opt in.
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# deny, not forbid: one module may allow it (`blossom-app/src/quit.rs`,
+# the C exit hook that saves on macOS Quit). Nothing else uses unsafe.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
