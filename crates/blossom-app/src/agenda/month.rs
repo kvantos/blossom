@@ -7,6 +7,7 @@ use chrono::{Datelike, Days, NaiveDate};
 use iced::widget::{Column, Row, button, column, container, space, text};
 use iced::{Element, Fill, Theme};
 
+use super::prefs::AgendaPrefs;
 use super::{AgendaMsg, Scope, View, colour, month_end, month_start, week};
 use crate::app::{Message, bold, dim};
 use crate::style;
@@ -25,10 +26,22 @@ fn letters(first: NaiveDate) -> Vec<String> {
         .collect()
 }
 
+/// How many items a day of the month grid shows.
+pub const SHOWN: usize = 3;
+
+/// Every day the month grid draws for `month`: whole weeks.
+#[must_use]
+pub fn grid_days(month: NaiveDate, prefs: &AgendaPrefs) -> Vec<NaiveDate> {
+    weeks(month, prefs)
+        .into_iter()
+        .flat_map(|w| (0..7).map(move |i| w + Days::new(i)))
+        .collect()
+}
+
 /// The weeks covering `month`'s days, as their first days.
-fn weeks(month: NaiveDate, v: &View<'_>) -> Vec<NaiveDate> {
+fn weeks(month: NaiveDate, prefs: &AgendaPrefs) -> Vec<NaiveDate> {
     let mut out = Vec::new();
-    let mut w = v.prefs.week_of(month_start(month));
+    let mut w = prefs.week_of(month_start(month));
     while w <= month_end(month) {
         out.push(w);
         w = w + Days::new(7);
@@ -61,7 +74,7 @@ fn mini<'a>(
 ) -> Element<'a, Message> {
     let (from, to) = v.place.shown(v.prefs);
     let in_view = v.place.scope != Scope::Year && v.place.scope != Scope::Quarter;
-    let weeks = weeks(month, v);
+    let weeks = weeks(month, v.prefs);
     let first = weeks.first().copied().unwrap_or(month);
     let head = Row::from_iter(letters(first).into_iter().map(|l| {
         container(text(l).size(10).style(dim))
@@ -191,9 +204,8 @@ pub fn many<'a>(cal: &'a Calendar, v: &View<'a>) -> Element<'a, Message> {
 
 /// The month grid: a cell per day with its items.
 pub fn grid<'a>(cal: &'a Calendar, v: &View<'a>) -> Element<'a, Message> {
-    const SHOWN: usize = 3;
     let (from, _) = v.place.shown(v.prefs);
-    let weeks = weeks(from, v);
+    let weeks = weeks(from, v.prefs);
     let first = weeks.first().copied().unwrap_or(from);
     let head = Row::from_iter((0..7).map(|i| {
         container(

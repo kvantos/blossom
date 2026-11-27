@@ -121,7 +121,9 @@ model = "multilingual"        # about 100 languages (488 MB)
 a year. Above the calendar, **Ongoing** lists headings with both SCHEDULED
 and DEADLINE, or a date range like `<2026-11-09 Mon>--<2026-12-20 Sun>`, as
 bars filled to their progress (`[3/8]`, checkboxes or child TODOs). Hover an
-item for its details; click it to open it. The files menu at the end of
+item for its details; click it to open it. From the keyboard, Tab (or ↓ ↑)
+moves through the items, Enter shows an item's card and Enter again opens it,
+Esc hides the card. The files menu at the end of
 the toolbar shows all files or only the ones you tick. Week start, working hours and up
 to two extra time zones are under **Settings → Agenda**.
 

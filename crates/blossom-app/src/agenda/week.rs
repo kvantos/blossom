@@ -195,8 +195,11 @@ fn day_header<'a>(d: NaiveDate, today: NaiveDate) -> Element<'a, Message> {
 }
 
 /// The untimed items of a day, as chips.
+/// How many untimed items a day shows in the week.
+pub const UNTIMED_SHOWN: usize = 4;
+
 fn untimed<'a>(cal: &'a Calendar, d: NaiveDate, v: &View<'a>) -> Element<'a, Message> {
-    const SHOWN: usize = 4;
+    const SHOWN: usize = UNTIMED_SHOWN;
     let items: Vec<&Item> = cal.on(d).iter().filter(|i| i.time().is_none()).collect();
     let mut chips: Vec<Element<'a, Message>> =
         items.iter().take(SHOWN).map(|i| chip(i, d, v)).collect();
@@ -253,10 +256,19 @@ pub fn chip<'a>(i: &'a Item, d: NaiveDate, v: &View<'a>) -> Element<'a, Message>
     } else {
         title.into()
     });
+    let focused = v.item_focused(d, i);
     let line = container(Row::with_children(parts).spacing(4).align_y(iced::Center))
         .padding([1, 4])
         .clip(true)
-        .width(Fill);
+        .width(Fill)
+        .style(move |theme: &Theme| container::Style {
+            border: if focused {
+                super::focus_ring(theme)
+            } else {
+                iced::Border::default()
+            },
+            ..container::Style::default()
+        });
     hoverable(line, card(i, d, &v.prefs.zones, slot), &i.note)
 }
 
@@ -414,6 +426,7 @@ fn block<'a>(i: &'a Item, d: NaiveDate, v: &View<'a>, hours: f32) -> Element<'a,
         body = body.push(text(time).size(11).style(dim));
     }
     let done = i.note.record.done;
+    let focused = v.item_focused(d, i);
     let content = row![
         container(space())
             .width(3)
@@ -437,9 +450,13 @@ fn block<'a>(i: &'a Item, d: NaiveDate, v: &View<'a>, hours: f32) -> Element<'a,
                         .scale_alpha(alpha)
                         .into(),
                 ),
-                border: iced::Border {
-                    radius: 4.0.into(),
-                    ..iced::Border::default()
+                border: if focused {
+                    super::focus_ring(theme)
+                } else {
+                    iced::Border {
+                        radius: 4.0.into(),
+                        ..iced::Border::default()
+                    }
                 },
                 ..container::Style::default()
             }

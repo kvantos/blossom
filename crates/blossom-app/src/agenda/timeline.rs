@@ -190,11 +190,8 @@ fn summary(spans: &[&Span], today: NaiveDate) -> (usize, usize, usize) {
 /// The timeline.
 pub fn view<'a>(cal: &'a Calendar, v: &View<'a>) -> Element<'a, Message> {
     let (from, to) = v.place.shown(v.prefs);
-    let spans: Vec<&Span> = cal
-        .ongoing
-        .iter()
-        .filter(|s| s.start <= to && s.late(v.today).map_or(s.end, |_| v.today) >= from)
-        .collect();
+    let visible = super::visible_spans(cal, v.place, v.prefs, v.today);
+    let spans: Vec<&Span> = visible.iter().map(|i| &cal.ongoing[*i]).collect();
     let (open, behind, late) = summary(&spans, v.today);
     let period = match v.place.scope {
         Scope::Week => "this week",
@@ -241,13 +238,14 @@ pub fn view<'a>(cal: &'a Calendar, v: &View<'a>) -> Element<'a, Message> {
         } else {
             parts.push(labels_row(v, from, to));
             let mut file: Option<&str> = None;
-            for s in spans {
+            for i in visible {
+                let s = &cal.ongoing[i];
                 let path = s.note.record.path.as_str();
                 if file != Some(path) {
                     file = Some(path);
                     parts.push(file_row(path, v.slot(path)));
                 }
-                parts.push(span_row(s, v, from, to));
+                parts.push(span_row(s, v, from, to, v.span_focused(i)));
             }
         }
     }
@@ -309,15 +307,29 @@ fn status_text<'a>(s: &Span, today: NaiveDate) -> Element<'a, Message> {
     }
 }
 
-fn span_row<'a>(s: &'a Span, v: &View<'a>, from: NaiveDate, to: NaiveDate) -> Element<'a, Message> {
+fn span_row<'a>(
+    s: &'a Span,
+    v: &View<'a>,
+    from: NaiveDate,
+    to: NaiveDate,
+    focused: bool,
+) -> Element<'a, Message> {
     let left = column![
         text(super::plain_title(&s.note.record.title)).size(13),
         status_text(s, v.today)
     ]
     .width(LABELS)
     .padding(iced::Padding::default().right(10));
-    row![left, track(s, v, from, to)]
-        .align_y(iced::Center)
+    container(row![left, track(s, v, from, to)].align_y(iced::Center))
+        .padding([0, 2])
+        .style(move |theme: &Theme| container::Style {
+            border: if focused {
+                super::focus_ring(theme)
+            } else {
+                iced::Border::default()
+            },
+            ..container::Style::default()
+        })
         .into()
 }
 
@@ -511,7 +523,7 @@ fn bar<'a>(
 }
 
 /// The hover card for a span.
-fn span_card<'a>(s: &Span, slot: usize) -> Element<'a, Message> {
+pub fn span_card<'a>(s: &Span, slot: usize) -> Element<'a, Message> {
     let mut parts: Vec<Element<'a, Message>> = vec![
         text(super::title_line(&s.note))
             .size(14)

@@ -695,6 +695,50 @@ impl App {
         Task::none()
     }
 
+    /// The agenda's keys: Tab / Shift+Tab and ↓ ↑ move the highlight
+    /// through the items, Enter shows the card, Enter again opens the
+    /// heading. `None` when the key isn't one of these here.
+    fn agenda_key(&mut self, key: &Key, modifiers: keyboard::Modifiers) -> Option<Task<Message>> {
+        use keyboard::key::Named;
+        let free = self.view == View::Agenda
+            && self.settings_panel.is_none()
+            && self.capture.is_none()
+            && self.refile.is_none()
+            && self.new_file.is_none()
+            && (modifiers.is_empty() || modifiers == keyboard::Modifiers::SHIFT);
+        if !free {
+            return None;
+        }
+        let cal = self.agenda_shown.clone()?;
+        let targets = agenda::targets(&cal, self.agenda_place, &self.settings.agenda, self.today);
+        let place = &mut self.agenda_place;
+        match key.as_ref() {
+            Key::Named(Named::Tab) => place.step_focus(&targets, !modifiers.shift()),
+            Key::Named(Named::ArrowDown) => place.step_focus(&targets, true),
+            Key::Named(Named::ArrowUp) => place.step_focus(&targets, false),
+            Key::Named(Named::Enter) => {
+                if place.card
+                    && let Some(target) = place.focus
+                {
+                    let note = match target {
+                        agenda::Target::Span(i) => cal.ongoing.get(i).map(|s| &s.note),
+                        agenda::Target::Item(d, i) => cal.on(d).get(i).map(|i| &i.note),
+                    }?;
+                    let msg = agenda::open(note);
+                    place.focus = None;
+                    place.card = false;
+                    return Some(self.update(msg));
+                }
+                if place.focus.is_none() {
+                    place.step_focus(&targets, true);
+                }
+                place.card = place.focus.is_some();
+            }
+            _ => return None,
+        }
+        Some(Task::none())
+    }
+
     /// The files the agenda shows in this folder; `None` for all.
     fn agenda_files(&self) -> Option<&[String]> {
         self.state.agenda_files(self.root.as_deref()?)
@@ -2177,6 +2221,14 @@ impl App {
                 self.agenda_place.menu = false;
                 return Task::none();
             }
+            // The card first, then the highlight.
+            if self.view == View::Agenda && self.agenda_place.card {
+                self.agenda_place.card = false;
+                return Task::none();
+            }
+            if self.view == View::Agenda && self.agenda_place.focus.take().is_some() {
+                return Task::none();
+            }
             if self.refile.take().is_some() {
                 return Task::none();
             }
@@ -2184,6 +2236,9 @@ impl App {
                 self.cancel_capture(false);
                 return Task::none();
             }
+        }
+        if let Some(task) = self.agenda_key(key, *modifiers) {
+            return task;
         }
         let editing = self.file.as_ref().is_some_and(|f| f.editor.is_some());
         let Some(action) = keys::app_key(key, *physical_key, *modifiers) else {
@@ -2248,6 +2303,12 @@ impl App {
         }
         if plan.agenda_menu {
             self.agenda_place.menu = true;
+        }
+        if let (Some(n), Some(cal)) = (plan.agenda_card, self.agenda_shown.clone()) {
+            let targets =
+                agenda::targets(&cal, self.agenda_place, &self.settings.agenda, self.today);
+            self.agenda_place.focus = targets.get(n).copied();
+            self.agenda_place.card = self.agenda_place.focus.is_some();
         }
         if plan.appearance {
             let _ = self.on_setting(Setting::Open);
@@ -3648,6 +3709,75 @@ mod tests {
             repeat: false,
         }));
         assert!(!a.agenda_place.menu);
+    }
+
+    #[test]
+    fn the_agenda_answers_the_keyboard() {
+        use crate::agenda::{AgendaMsg, Scope, Target};
+        use keyboard::key::Named;
+        let mut a = loaded("* one\n");
+        let _ = a.update(Message::ShowAgenda);
+        let _ = a.update(Message::Agenda(AgendaMsg::Scope(Scope::Week)));
+        let today = a.today;
+        let text = format!(
+            "* TODO Plan\nSCHEDULED: <{0}> DEADLINE: <{1}>\n* Meet\n<{0} 10:00>\n* TODO Call\nDEADLINE: <{0}>\n",
+            today.format("%Y-%m-%d %a"),
+            (today + chrono::Days::new(30)).format("%Y-%m-%d %a"),
+        );
+        let notes: Vec<blossom_index::Note> = blossom_index::records(
+            "a.org",
+            &Document::parse(&text, Keywords::default()),
+            &Keywords::default(),
+            0,
+        )
+        .into_iter()
+        .map(blossom_index::Note::from)
+        .collect();
+        let (from, to) = a.agenda_place.fetch(&a.settings.agenda);
+        let cal = blossom_index::calendar::build(&notes, from, to, today);
+        let _ = a.update(Message::Worker(Event::Agenda(Arc::new(cal))));
+        let press = |a: &mut App, key: Named, modifiers: keyboard::Modifiers| {
+            let _ = a.update(Message::Key(keyboard::Event::KeyPressed {
+                key: Key::Named(key),
+                modified_key: Key::Named(key),
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers,
+                text: None,
+                repeat: false,
+            }));
+        };
+        let none = keyboard::Modifiers::empty();
+        // Tab: the timeline's bar, then today's untimed item, then the timed one.
+        press(&mut a, Named::Tab, none);
+        assert_eq!(a.agenda_place.focus, Some(Target::Span(0)));
+        press(&mut a, Named::ArrowDown, none);
+        let call = a.agenda_place.focus;
+        assert!(matches!(call, Some(Target::Item(d, _)) if d == today));
+        press(&mut a, Named::Tab, none);
+        press(&mut a, Named::Tab, keyboard::Modifiers::SHIFT);
+        assert_eq!(a.agenda_place.focus, call);
+        // Up from the first wraps to the last.
+        press(&mut a, Named::ArrowUp, none);
+        press(&mut a, Named::ArrowUp, none);
+        let last = a.agenda_place.focus;
+        assert!(matches!(last, Some(Target::Item(..))));
+        // Enter shows the card (and it draws); Esc hides it, then the highlight.
+        press(&mut a, Named::Enter, none);
+        assert!(a.agenda_place.card);
+        let _ = a.view();
+        press(&mut a, Named::Escape, none);
+        assert!(!a.agenda_place.card && a.agenda_place.focus.is_some());
+        press(&mut a, Named::Escape, none);
+        assert_eq!(a.agenda_place.focus, None);
+        // Enter, Enter: the card, then the heading opens.
+        press(&mut a, Named::Enter, none);
+        assert_eq!(a.agenda_place.focus, Some(Target::Span(0)));
+        press(&mut a, Named::Enter, none);
+        assert_eq!(a.view, View::Files);
+        assert_eq!(a.agenda_place.focus, None);
     }
 
     #[test]

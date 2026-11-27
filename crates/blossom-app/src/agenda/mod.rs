@@ -82,6 +82,15 @@ pub enum AgendaMsg {
     File(String, bool),
 }
 
+/// An item the keyboard can reach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The Nth span of the calendar's `ongoing`.
+    Span(usize),
+    /// The Nth item of a day.
+    Item(NaiveDate, usize),
+}
+
 /// Where the agenda is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Place {
@@ -93,6 +102,10 @@ pub struct Place {
     pub timeline: bool,
     /// The file menu is open.
     pub menu: bool,
+    /// The item the keyboard is on.
+    pub focus: Option<Target>,
+    /// Its card is showing.
+    pub card: bool,
 }
 
 impl Place {
@@ -104,6 +117,8 @@ impl Place {
             anchor: today,
             timeline,
             menu: false,
+            focus: None,
+            card: false,
         }
     }
 
@@ -126,7 +141,33 @@ impl Place {
             // The app keeps the chosen files.
             AgendaMsg::AllFiles(_) | AgendaMsg::File(..) => {}
         }
-        self.scope != before.scope || self.anchor != before.anchor
+        let moved = self.scope != before.scope || self.anchor != before.anchor;
+        if moved || self.timeline != before.timeline {
+            self.focus = None;
+            self.card = false;
+        }
+        moved
+    }
+
+    /// Moves the keyboard to the next (or previous) of `targets`, round
+    /// the end; the card follows when it was showing.
+    pub fn step_focus(&mut self, targets: &[Target], forward: bool) {
+        if targets.is_empty() {
+            self.focus = None;
+            self.card = false;
+            return;
+        }
+        let at = self
+            .focus
+            .and_then(|f| targets.iter().position(|t| *t == f));
+        let n = targets.len();
+        let next = match (at, forward) {
+            (None, true) => 0,
+            (None, false) => n - 1,
+            (Some(i), true) => (i + 1) % n,
+            (Some(i), false) => (i + n - 1) % n,
+        };
+        self.focus = Some(targets[next]);
     }
 
     fn step(self, forward: bool) -> NaiveDate {
@@ -249,6 +290,25 @@ pub struct View<'a> {
 }
 
 impl View<'_> {
+    /// Whether the keyboard is on span `index`.
+    #[must_use]
+    pub fn span_focused(&self, index: usize) -> bool {
+        self.place.focus == Some(Target::Span(index))
+    }
+
+    /// Whether the keyboard is on `item` of `day`.
+    #[must_use]
+    pub fn item_focused(&self, day: NaiveDate, item: &Item) -> bool {
+        let Some(Target::Item(d, i)) = self.place.focus else {
+            return false;
+        };
+        d == day
+            && self
+                .calendar
+                .and_then(|c| c.on(d).get(i))
+                .is_some_and(|x| std::ptr::eq(x, item))
+    }
+
     /// Whether the agenda shows the file at `path`.
     #[must_use]
     pub fn shows(&self, path: &str) -> bool {
@@ -270,6 +330,103 @@ impl View<'_> {
     #[must_use]
     pub fn slot(&self, path: &str) -> usize {
         self.files.iter().position(|f| f.path == path).unwrap_or(0)
+    }
+}
+
+/// The spans the timeline shows: those touching the days shown (a late
+/// one reaches to today), as indexes into `ongoing`.
+#[must_use]
+pub fn visible_spans(
+    cal: &Calendar,
+    place: Place,
+    prefs: &AgendaPrefs,
+    today: NaiveDate,
+) -> Vec<usize> {
+    let (from, to) = place.shown(prefs);
+    cal.ongoing
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.start <= to && s.late(today).map_or(s.end, |_| today) >= from)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The items the keyboard goes through, in order: the timeline's bars
+/// (when it's open), then the calendar day by day as drawn.
+#[must_use]
+pub fn targets(cal: &Calendar, place: Place, prefs: &AgendaPrefs, today: NaiveDate) -> Vec<Target> {
+    let mut out: Vec<Target> = Vec::new();
+    if place.timeline {
+        out.extend(
+            visible_spans(cal, place, prefs, today)
+                .into_iter()
+                .map(Target::Span),
+        );
+    }
+    let (from, _) = place.shown(prefs);
+    match place.scope {
+        Scope::Week => {
+            for d in (0..7).map(|i| from + Days::new(i)) {
+                let items = cal.on(d);
+                let untimed = (0..items.len()).filter(|i| items[*i].time().is_none());
+                out.extend(
+                    untimed
+                        .take(week::UNTIMED_SHOWN)
+                        .map(|i| Target::Item(d, i)),
+                );
+                let timed = (0..items.len()).filter(|i| items[*i].time().is_some());
+                out.extend(timed.map(|i| Target::Item(d, i)));
+            }
+        }
+        Scope::Month => {
+            for d in month::grid_days(from, prefs) {
+                let n = cal.on(d).len().min(month::SHOWN);
+                out.extend((0..n).map(|i| Target::Item(d, i)));
+            }
+        }
+        Scope::Quarter | Scope::Year => {}
+    }
+    out
+}
+
+/// The card for the item the keyboard is on, when it's showing.
+fn focused_card<'a>(cal: &'a Calendar, v: &View<'a>) -> Option<Element<'a, Message>> {
+    if !v.place.card {
+        return None;
+    }
+    let card = match v.place.focus? {
+        Target::Span(i) => {
+            let s = cal.ongoing.get(i)?;
+            timeline::span_card(s, v.slot(&s.note.record.path))
+        }
+        Target::Item(d, i) => {
+            let item = cal.on(d).get(i)?;
+            card(item, d, &v.prefs.zones, v.slot(&item.note.record.path))
+        }
+    };
+    Some(
+        container(
+            column![
+                card,
+                text("Enter opens it · Esc hides this").size(11).style(dim)
+            ]
+            .spacing(4)
+            .align_x(iced::Right),
+        )
+        .align_right(Fill)
+        .align_bottom(Fill)
+        .padding(16)
+        .into(),
+    )
+}
+
+/// The outline drawn round the item the keyboard is on.
+#[must_use]
+pub fn focus_ring(theme: &Theme) -> iced::Border {
+    iced::Border {
+        color: theme.palette().primary,
+        width: 2.0,
+        radius: 5.0.into(),
     }
 }
 
@@ -296,12 +453,16 @@ pub fn view<'a>(v: &View<'a>) -> Element<'a, Message> {
         Scope::Quarter | Scope::Year => month::many(cal, v),
     };
     parts.push(body);
-    column![
+    let page: Element<'a, Message> = column![
         top,
         rule::horizontal(1),
         scrollable(Column::with_children(parts)).height(Fill)
     ]
-    .into()
+    .into();
+    match focused_card(cal, v) {
+        Some(card) => iced::widget::stack![page, card].into(),
+        None => page,
+    }
 }
 
 /// The title without progress cookies (`[3/8]`, `[40%]`), which the
