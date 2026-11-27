@@ -2292,7 +2292,9 @@ impl App {
             f.refresh_blocks();
             f.fill_inputs();
         }
-        if let Some(path) = &plan.diagram {
+        if plan.diagram.as_deref() == Some("new") {
+            let _ = self.update(Message::NewDiagram);
+        } else if let Some(path) = &plan.diagram {
             // Captured once the diagram arrives.
             self.image_action(path.clone());
             return Task::none();

@@ -54,7 +54,8 @@ pub struct Plan {
     pub new_file: Option<String>,
     /// The Settings section to show.
     pub section: Option<crate::settings_panel::Section>,
-    /// Open this diagram (a link path in the file) before capturing.
+    /// Open this diagram (a link path in the file; `new` for a blank one)
+    /// before capturing.
     pub diagram: Option<String>,
 }
 

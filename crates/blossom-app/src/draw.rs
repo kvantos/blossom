@@ -63,6 +63,20 @@ impl Tool {
         Tool::Text,
     ];
 
+    fn icon(self) -> &'static iced::widget::svg::Handle {
+        use crate::icons;
+        match self {
+            Tool::Select => &icons::SELECT,
+            Tool::Pen => &icons::PEN,
+            Tool::Line => &icons::LINE,
+            Tool::Arrow => &icons::ARROW,
+            Tool::Rect => &icons::RECT,
+            Tool::Ellipse => &icons::ELLIPSE,
+            Tool::Diamond => &icons::DIAMOND,
+            Tool::Text => &icons::TEXT,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Tool::Select => "Select",
@@ -868,22 +882,37 @@ fn outline(frame: &mut Frame, e: &Element, zoom: f32) {
     );
 }
 
+/// The tool buttons: an icon beside each name.
+fn tools(ed: &DiagramEditor) -> Widget<'_, Message> {
+    let on = Message::Diagram;
+    row(Tool::ALL.iter().map(|t| {
+        let chosen = ed.tool == *t;
+        button(
+            row![
+                crate::icons::view(t.icon(), 16.0, chosen),
+                text(t.label()).size(13)
+            ]
+            .spacing(5)
+            .align_y(iced::Center),
+        )
+        .on_press(on(Edit::Tool(*t)))
+        .padding([3, 8])
+        .style(if ed.tool == *t {
+            button::primary
+        } else {
+            button::secondary
+        })
+        .into()
+    }))
+    .spacing(4)
+    .wrap()
+    .into()
+}
+
 /// The editor: toolbar and canvas.
 pub fn view(ed: &DiagramEditor) -> Widget<'_, Message> {
     let on = Message::Diagram;
-    let tools = row(Tool::ALL.iter().map(|t| {
-        button(text(t.label()).size(13))
-            .on_press(on(Edit::Tool(*t)))
-            .padding([3, 8])
-            .style(if ed.tool == *t {
-                button::primary
-            } else {
-                button::secondary
-            })
-            .into()
-    }))
-    .spacing(4)
-    .wrap();
+    let tools = tools(ed);
     let colors = row(COLORS.iter().enumerate().map(|(i, c)| {
         let color = rgb(c);
         let chosen = ed.color == i;
