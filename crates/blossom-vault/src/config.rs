@@ -37,6 +37,16 @@ pub struct Config {
     pub semantic: SemanticConfig,
     /// The app's colours and fonts (`[appearance]`).
     pub appearance: AppearanceConfig,
+    /// The app's note editor (`[editor]`).
+    pub editor: EditorConfig,
+}
+
+/// The `[editor]` table, read by the app.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct EditorConfig {
+    /// Emacs keys in the editor (C-f, C-k, M-f, …); default on.
+    pub emacs_keys: Option<bool>,
 }
 
 /// The `[appearance]` table, read by the app. Every field is optional; the

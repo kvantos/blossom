@@ -94,6 +94,10 @@ pub struct App {
     sidebar: bool,
     /// The sidebar's "New file" form, when open.
     new_file: Option<NewFile>,
+    /// The text of the last kill (C-k, M-d, M-DEL), for C-y.
+    kill_ring: String,
+    /// The last editor command was a kill, so the next one adds to it.
+    kill_append: bool,
     /// The file last open in each folder.
     state: State,
     /// Where `state` is saved; `None` in tests.
@@ -337,7 +341,7 @@ impl App {
         shot: Option<shot::Plan>,
         (config, config_path): (Config, Option<PathBuf>),
     ) -> (App, Task<Message>) {
-        let (settings, problems) = Settings::from_config(&config.appearance);
+        let (settings, problems) = Settings::from_all(&config);
         let forced = shot.as_ref().and_then(|p| p.mode);
         let search_input = shot
             .as_ref()
@@ -352,6 +356,8 @@ impl App {
             settings_panel: None,
             sidebar: true,
             new_file: None,
+            kill_ring: String::new(),
+            kill_append: false,
             state: State::default(),
             state_path: None,
             choose_start: false,
@@ -521,6 +527,7 @@ impl App {
             Setting::EditorFont(f) => new.editor_font = f.0,
             Setting::EditorSize(n) => new.editor_size = n,
             Setting::Labels(l) => new.top_bar_labels = l,
+            Setting::EmacsKeys(on) => new.emacs_keys = on,
         }
         self.set_settings(new);
         Task::none()
@@ -669,7 +676,7 @@ impl App {
         if config == self.config {
             return;
         }
-        let (settings, mut problems) = Settings::from_config(&config.appearance);
+        let (settings, mut problems) = Settings::from_all(&config);
         self.settings = settings;
         if let Err(e) = config.templates() {
             problems.push(format!("{e}; using the built-in capture templates"));
@@ -725,6 +732,14 @@ impl App {
     /// Applies a message, then asks the worker for any image the read view
     /// shows that isn't loaded yet.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Kills in a row add up; anything else in the editor ends the run.
+        if matches!(
+            message,
+            Message::EditorAction(_) | Message::EditorCommand(_)
+        ) && !matches!(message, Message::EditorCommand(Command::Kill(_)))
+        {
+            self.kill_append = false;
+        }
         let task = self.update_inner(message);
         self.request_pictures();
         task
@@ -811,6 +826,7 @@ impl App {
             Message::StopEditing | Message::EditorCommand(Command::Done) => self.stop_editing(),
             Message::EditorAction(action) => self.editor_action(action),
             Message::EditorCommand(Command::Enter) => self.enter(),
+            Message::EditorCommand(c @ (Command::Kill(_) | Command::Yank)) => self.kill_or_yank(c),
             Message::EditorCommand(Command::Paste) => return paste(),
             Message::EditorCommand(Command::Undo) | Message::Undo => self.undo(false),
             Message::EditorCommand(Command::Redo) | Message::Redo => self.undo(true),
@@ -1823,6 +1839,73 @@ impl App {
         }
     }
 
+    /// An Emacs kill (the text goes to the kill ring; kills in a row add
+    /// up, M-DEL's in front) or C-y (inserts the kill ring's text).
+    fn kill_or_yank(&mut self, command: Command) {
+        let Some(f) = &mut self.file else { return };
+        let before = f.snapshot();
+        let Some(ed) = &mut f.editor else { return };
+        let kind = match command {
+            Command::Kill(kind) => kind,
+            Command::Yank => {
+                if !self.kill_ring.is_empty() {
+                    ed.content
+                        .perform(Action::Edit(Edit::Paste(Arc::new(self.kill_ring.clone()))));
+                    self.sync_editor(before, Group::Single);
+                }
+                return;
+            }
+            _ => return,
+        };
+        // A kill ignores the selection, as in Emacs.
+        let cursor = ed.content.cursor();
+        ed.content.move_to(iced::widget::text_editor::Cursor {
+            position: cursor.position,
+            selection: None,
+        });
+        let motion = match kind {
+            editor::Kill::Line => {
+                let line_len = ed
+                    .content
+                    .line(cursor.position.line)
+                    .map_or(0, |l| l.text.len());
+                // At the end of the line, the line break goes.
+                if cursor.position.column >= line_len {
+                    Motion::Right
+                } else {
+                    Motion::End
+                }
+            }
+            editor::Kill::WordForward => Motion::WordRight,
+            editor::Kill::WordBackward => Motion::WordLeft,
+        };
+        ed.content.perform(Action::Select(motion));
+        // iced counts a run of spaces as a word; Emacs kills through it to
+        // the word beyond.
+        if motion != Motion::Right
+            && ed
+                .content
+                .selection()
+                .is_some_and(|s| !s.is_empty() && s.trim().is_empty())
+        {
+            ed.content.perform(Action::Select(motion));
+        }
+        let Some(killed) = ed.content.selection().filter(|s| !s.is_empty()) else {
+            return;
+        };
+        ed.content.perform(Action::Edit(Edit::Delete));
+        if !self.kill_append {
+            self.kill_ring.clear();
+        }
+        if kind == editor::Kill::WordBackward {
+            self.kill_ring.insert_str(0, &killed);
+        } else {
+            self.kill_ring.push_str(&killed);
+        }
+        self.kill_append = true;
+        self.sync_editor(before, Group::Single);
+    }
+
     /// Enter in the editor, continuing or ending a list.
     fn enter(&mut self) {
         let Some(f) = &mut self.file else { return };
@@ -2584,7 +2667,10 @@ impl App {
                     },
                     editor::format,
                 )
-                .key_binding(editor::bindings(Message::EditorCommand))
+                .key_binding(editor::bindings(
+                    Message::EditorCommand,
+                    self.settings.emacs_keys,
+                ))
                 .font(ink.code)
                 .size(self.settings.editor_size)
                 .padding(12)
@@ -3111,7 +3197,7 @@ mod tests {
 
     /// The appearance in the config at `path`.
     fn saved(path: &Path) -> Settings {
-        Settings::from_config(&Config::load(path).unwrap().appearance).0
+        Settings::from_all(&Config::load(path).unwrap()).0
     }
 
     #[test]
@@ -3615,6 +3701,52 @@ mod tests {
         assert_eq!(a.refile.as_ref().unwrap().matches(), [3]);
         let _ = a.update(Message::RefilePick(3));
         assert!(a.refile.is_none());
+    }
+
+    #[test]
+    fn emacs_kills_add_up_and_yank_back() {
+        use crate::editor::Kill;
+        let mut a = loaded("* one\nalpha beta\ngamma\n* two\n");
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        let _ = a.update(Message::StartEditing);
+        let kill = |a: &mut App, k| {
+            let _ = a.update(Message::EditorCommand(Command::Kill(k)));
+        };
+        let go = |a: &mut App, m| {
+            let _ = a.update(Message::EditorAction(Action::Move(m)));
+        };
+        // To the start of "alpha beta".
+        go(&mut a, Motion::DocumentStart);
+        go(&mut a, Motion::Down);
+        // C-k C-k C-k: the line, its break, the next line; one kill.
+        kill(&mut a, Kill::Line);
+        kill(&mut a, Kill::Line);
+        kill(&mut a, Kill::Line);
+        assert_eq!(text_of(&a), "* one\n\n* two\n");
+        assert_eq!(a.kill_ring, "alpha beta\ngamma");
+        // Moving ends the run: a new kill replaces it. M-d kills to the
+        // end of the word.
+        // C-y where it was killed puts it back.
+        let _ = a.update(Message::EditorCommand(Command::Yank));
+        assert_eq!(text_of(&a), "* one\nalpha beta\ngamma\n* two\n");
+        go(&mut a, Motion::DocumentStart);
+        go(&mut a, Motion::Down);
+        kill(&mut a, Kill::WordForward);
+        assert_eq!(text_of(&a), "* one\n beta\ngamma\n* two\n");
+        assert_eq!(a.kill_ring, "alpha");
+        // M-d again kills through the space to the next word's end.
+        kill(&mut a, Kill::WordForward);
+        assert_eq!(a.kill_ring, "alpha beta");
+        let _ = a.update(Message::EditorCommand(Command::Yank));
+        // M-DEL twice from the line's end: both words, in their order.
+        go(&mut a, Motion::End);
+        kill(&mut a, Kill::WordBackward);
+        kill(&mut a, Kill::WordBackward);
+        assert_eq!(a.kill_ring, "alpha beta");
+        assert_eq!(text_of(&a), "* one\n\ngamma\n* two\n");
+        // Undo brings the kill back.
+        let _ = a.update(Message::EditorCommand(Command::Undo));
+        assert!(text_of(&a).starts_with("* one\n"), "{}", text_of(&a));
     }
 
     #[test]

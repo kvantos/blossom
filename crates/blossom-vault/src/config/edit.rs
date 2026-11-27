@@ -85,6 +85,11 @@ pub const TEMPLATE: &str = r#"# Blossom's settings, read by the app and by `blsm
 # Names in the top bar: none (icons only, a hint on hover), below or beside the icons.
 # top_bar_labels = "none"
 
+[editor]
+# Emacs keys in the note editor: C-f C-b C-n C-p, C-a C-e, M-f M-b, C-d M-d M-DEL,
+# C-k (kill to the end of the line), C-y (yank), M-< M->. Off gives the usual keys.
+# emacs_keys = true
+
 [semantic]
 # Search by meaning: english (built in), multilingual (built in, downloaded
 # on first use) or server (an OpenAI-compatible server such as Ollama).

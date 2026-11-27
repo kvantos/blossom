@@ -7,8 +7,8 @@
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
-use blossom_vault::config::AppearanceConfig;
 use blossom_vault::config::edit::Change;
+use blossom_vault::config::{AppearanceConfig, Config};
 use serde::de::{DeserializeOwned, IntoDeserializer as _};
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +41,8 @@ pub struct Settings {
     pub editor_size: u32,
     /// Where the top bar's labels go.
     pub top_bar_labels: Labels,
+    /// Emacs keys in the editor (`[editor] emacs_keys`).
+    pub emacs_keys: bool,
 }
 
 impl Default for Settings {
@@ -53,6 +55,7 @@ impl Default for Settings {
             editor_font: None,
             editor_size: 14,
             top_bar_labels: Labels::default(),
+            emacs_keys: true,
         }
     }
 }
@@ -90,6 +93,15 @@ fn name<T: Serialize>(choice: T) -> String {
 }
 
 impl Settings {
+    /// The choices in the whole config: [`Settings::from_config`] plus
+    /// `[editor]`.
+    #[must_use]
+    pub fn from_all(config: &Config) -> (Settings, Vec<String>) {
+        let (mut s, problems) = Settings::from_config(&config.appearance);
+        s.emacs_keys = config.editor.emacs_keys.unwrap_or(true);
+        (s, problems)
+    }
+
     /// The choices in `config`. A value that isn't one of the choices (or a
     /// size out of range) gives the default, or the nearest size, and a
     /// message saying so.
@@ -148,6 +160,7 @@ impl Settings {
                 editor_font: font(&config.editor_font),
                 editor_size,
                 top_bar_labels,
+                emacs_keys: d.emacs_keys,
             },
             problems,
         )
@@ -179,6 +192,9 @@ impl Settings {
         }
         if self.editor_size != old.editor_size {
             out.push(Change::set(TABLE, "editor_size", self.editor_size));
+        }
+        if self.emacs_keys != old.emacs_keys {
+            out.push(Change::set(Some("editor"), "emacs_keys", self.emacs_keys));
         }
         if self.top_bar_labels != old.top_bar_labels {
             out.push(Change::set(
@@ -253,7 +269,6 @@ pub fn migrate(old: &Path, config: &Path, current: &AppearanceConfig) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blossom_vault::config::Config;
 
     fn appearance(path: &Path) -> AppearanceConfig {
         Config::load(path).unwrap().appearance
@@ -282,6 +297,7 @@ mod tests {
                 editor_font: None,
                 editor_size: 16,
                 top_bar_labels: Labels::Beside,
+                emacs_keys: true,
             }
         );
         assert_eq!(problems.len(), 1, "{problems:?}");
@@ -307,12 +323,13 @@ mod tests {
             editor_font: Some("Fira Code".into()),
             editor_size: 12,
             top_bar_labels: Labels::Below,
+            emacs_keys: false,
         };
         blossom_vault::config::edit::apply(&path, &s.changes_from(&d)).unwrap();
-        assert_eq!(
-            Settings::from_config(&appearance(&path)),
-            (s.clone(), vec![])
-        );
+        let all = |path: &Path| Settings::from_all(&Config::load(path).unwrap());
+        assert_eq!(all(&path), (s.clone(), vec![]));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\nemacs_keys = false\n"), "{text}");
         let back = Settings {
             read_font: None,
             ..s.clone()
@@ -320,7 +337,7 @@ mod tests {
         let changes = back.changes_from(&s);
         assert_eq!(changes, [Change::unset(TABLE, "read_font")]);
         blossom_vault::config::edit::apply(&path, &changes).unwrap();
-        assert_eq!(Settings::from_config(&appearance(&path)).0, back);
+        assert_eq!(all(&path).0, back);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("\n# read_font = \"Inter\"\n"), "{text}");
         assert!(text.contains("\ncolours = \"gray\"\n"), "{text}");

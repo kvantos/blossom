@@ -146,17 +146,106 @@ pub enum Command {
     Enter,
     /// Ctrl/Cmd+V: an image on the clipboard is attached, text is pasted.
     Paste,
+    /// An Emacs kill: the text goes to the kill ring.
+    Kill(Kill),
+    /// C-y: insert the last kill.
+    Yank,
+}
+
+/// What an Emacs kill removes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kill {
+    /// C-k: to the end of the line, or the line break when already there.
+    Line,
+    /// M-d: to the end of the word.
+    WordForward,
+    /// M-DEL: to the start of the word.
+    WordBackward,
+}
+
+/// The letter or sign a key press names for a binding: the key as typed
+/// when that is plain ASCII (so Dvorak's C-f is where Dvorak has f), else
+/// the key at that place on a US keyboard (so C-f works with a Russian
+/// layout, and M-f with macOS's Option, which types ƒ).
+fn binding_char(press: &KeyPress) -> Option<char> {
+    use keyboard::key::Code;
+    if let Key::Character(c) = &press.key {
+        let mut chars = c.chars();
+        if let (Some(ch), None) = (chars.next(), chars.next())
+            && ch.is_ascii_graphic()
+        {
+            return Some(ch.to_ascii_lowercase());
+        }
+    }
+    let keyboard::key::Physical::Code(code) = press.physical_key else {
+        return None;
+    };
+    Some(match code {
+        Code::KeyA => 'a',
+        Code::KeyB => 'b',
+        Code::KeyD => 'd',
+        Code::KeyE => 'e',
+        Code::KeyF => 'f',
+        Code::KeyK => 'k',
+        Code::KeyN => 'n',
+        Code::KeyP => 'p',
+        Code::KeyY => 'y',
+        Code::Comma => ',',
+        Code::Period => '.',
+        _ => return None,
+    })
+}
+
+/// The Emacs binding for `press`, if it is one: C-f/b/n/p, C-a/e, C-d,
+/// C-k, C-y, M-f/b, M-d, M-DEL and M-</M->. Ctrl is Control on macOS too
+/// (Cmd keeps its own keys); Meta is Alt or Option.
+fn emacs<M>(press: &KeyPress, on: fn(Command) -> M) -> Option<Binding<M>> {
+    use iced::widget::text_editor::Motion;
+    let m = press.modifiers;
+    let ctrl = m.control() && !m.alt() && !m.logo() && !m.shift();
+    let meta = m.alt() && !m.control() && !m.logo();
+    if meta && !m.shift() && matches!(press.key, Key::Named(key::Named::Backspace)) {
+        return Some(Binding::Custom(on(Command::Kill(Kill::WordBackward))));
+    }
+    if !ctrl && !meta {
+        return None;
+    }
+    let ch = binding_char(press)?;
+    Some(match (ctrl, m.shift(), ch) {
+        (true, _, 'f') => Binding::Move(Motion::Right),
+        (true, _, 'b') => Binding::Move(Motion::Left),
+        (true, _, 'n') => Binding::Move(Motion::Down),
+        (true, _, 'p') => Binding::Move(Motion::Up),
+        (true, _, 'a') => Binding::Move(Motion::Home),
+        (true, _, 'e') => Binding::Move(Motion::End),
+        (true, _, 'd') => Binding::Delete,
+        (true, _, 'k') => Binding::Custom(on(Command::Kill(Kill::Line))),
+        (true, _, 'y') => Binding::Custom(on(Command::Yank)),
+        (false, false, 'f') => Binding::Move(Motion::WordRight),
+        (false, false, 'b') => Binding::Move(Motion::WordLeft),
+        (false, false, 'd') => Binding::Custom(on(Command::Kill(Kill::WordForward))),
+        (false, true, ',' | '<') => Binding::Move(Motion::DocumentStart),
+        (false, true, '.' | '>') => Binding::Move(Motion::DocumentEnd),
+        _ => return None,
+    })
 }
 
 /// The editor's key bindings: iced's defaults plus undo/redo, Escape to
-/// leave and Enter for list continuation.
-pub fn bindings<M>(on: fn(Command) -> M) -> impl Fn(KeyPress) -> Option<Binding<M>> {
+/// leave and Enter for list continuation; with `emacs`, the Emacs keys
+/// first (then C-y yanks, and redo is Ctrl+Shift+Z).
+pub fn bindings<M>(
+    on: fn(Command) -> M,
+    emacs_keys: bool,
+) -> impl Fn(KeyPress) -> Option<Binding<M>> {
     move |press: KeyPress| {
         if !matches!(
             press.status,
             iced::widget::text_editor::Status::Focused { .. }
         ) {
             return None;
+        }
+        if emacs_keys && let Some(b) = emacs(&press, on) {
+            return Some(b);
         }
         let m = press.modifiers;
         match press.key.as_ref() {
@@ -207,6 +296,78 @@ pub fn capture_bindings<M: Clone>(save: M, cancel: M) -> impl Fn(KeyPress) -> Op
 mod tests {
     use super::*;
     use iced::advanced::text::Highlighter;
+    use iced::widget::text_editor::{Motion, Status};
+    use keyboard::key::{Code, NativeCode, Physical};
+
+    fn press(key: Key, physical: Physical, modifiers: keyboard::Modifiers) -> KeyPress {
+        KeyPress {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: physical,
+            modifiers,
+            text: None,
+            status: Status::Focused { is_hovered: false },
+        }
+    }
+
+    fn bind(p: KeyPress, emacs: bool) -> Option<Binding<Command>> {
+        bindings(|c| c, emacs)(p)
+    }
+
+    fn ch(c: &str) -> Key {
+        Key::Character(c.into())
+    }
+
+    const CTRL: keyboard::Modifiers = keyboard::Modifiers::CTRL;
+    const ALT: keyboard::Modifiers = keyboard::Modifiers::ALT;
+    const NONE: Physical = Physical::Unidentified(NativeCode::Unidentified);
+
+    #[test]
+    fn emacs_keys() {
+        let b = |k: &str, m| bind(press(ch(k), NONE, m), true);
+        assert_eq!(b("f", CTRL), Some(Binding::Move(Motion::Right)));
+        assert_eq!(b("a", CTRL), Some(Binding::Move(Motion::Home)));
+        assert_eq!(b("e", CTRL), Some(Binding::Move(Motion::End)));
+        assert_eq!(b("d", CTRL), Some(Binding::Delete));
+        assert_eq!(
+            b("k", CTRL),
+            Some(Binding::Custom(Command::Kill(Kill::Line)))
+        );
+        assert_eq!(b("y", CTRL), Some(Binding::Custom(Command::Yank)));
+        assert_eq!(b("f", ALT), Some(Binding::Move(Motion::WordRight)));
+        assert_eq!(
+            b("d", ALT),
+            Some(Binding::Custom(Command::Kill(Kill::WordForward)))
+        );
+        assert_eq!(
+            b(",", ALT | keyboard::Modifiers::SHIFT),
+            Some(Binding::Move(Motion::DocumentStart))
+        );
+        assert_eq!(
+            bind(press(Key::Named(key::Named::Backspace), NONE, ALT), true),
+            Some(Binding::Custom(Command::Kill(Kill::WordBackward)))
+        );
+        // A Russian layout, or Option+f on macOS: the key's place counts.
+        assert_eq!(
+            bind(press(ch("а"), Physical::Code(Code::KeyF), CTRL), true),
+            Some(Binding::Move(Motion::Right))
+        );
+        assert_eq!(
+            bind(press(ch("ƒ"), Physical::Code(Code::KeyF), ALT), true),
+            Some(Binding::Move(Motion::WordRight))
+        );
+        // Undo and the plain keys still work.
+        assert_eq!(b("z", CTRL), Some(Binding::Custom(Command::Undo)));
+        // Off: C-y redoes and C-a selects all, as before.
+        assert_eq!(
+            bind(press(ch("y"), NONE, CTRL), false),
+            Some(Binding::Custom(Command::Redo))
+        );
+        assert_eq!(
+            bind(press(ch("a"), NONE, CTRL), false),
+            Some(Binding::SelectAll)
+        );
+    }
 
     #[test]
     fn rehighlights_from_a_changed_line() {

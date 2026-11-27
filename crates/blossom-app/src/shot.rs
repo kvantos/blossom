@@ -4,7 +4,7 @@
 //! `BLOSSOM_SCREENSHOT_EDIT` is set) or shows the search screen for
 //! `BLOSSOM_SCREENSHOT_SEARCH` (a query, may be empty; by meaning with
 //! `BLOSSOM_SCREENSHOT_MEANING`), opens the Settings panel with
-//! `BLOSSOM_SCREENSHOT_APPEARANCE` (at section `notes` or `search` with
+//! `BLOSSOM_SCREENSHOT_APPEARANCE` (at section `editor`, `notes` or `search` with
 //! `BLOSSOM_SCREENSHOT_SECTION`), opens the "New file" form with a name
 //! typed with `BLOSSOM_SCREENSHOT_NEW_FILE`, saves a screenshot of the window as
 //! PNG and exits. `BLOSSOM_THEME` (`light`, `dark`, or
@@ -93,6 +93,7 @@ impl Plan {
                 .ok()
                 .and_then(|s| match s.as_str() {
                     "notes" => Some(crate::settings_panel::Section::Notes),
+                    "editor" => Some(crate::settings_panel::Section::Editor),
                     "search" => Some(crate::settings_panel::Section::Search),
                     _ => None,
                 }),

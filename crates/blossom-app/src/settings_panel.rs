@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use iced::widget::{
     Column, button, column, container, pick_list, radio, row, rule, scrollable, text, text_input,
+    toggler,
 };
 use iced::{Element, Fill};
 
@@ -25,6 +26,8 @@ pub enum Section {
     /// Colours, light/dark and fonts.
     #[default]
     Appearance,
+    /// The note editor's keys.
+    Editor,
     /// Which folder of notes to open.
     Notes,
     /// The model for search by meaning.
@@ -33,11 +36,17 @@ pub enum Section {
 
 impl Section {
     /// Every section, in the order the panel lists them.
-    pub const ALL: [Section; 3] = [Section::Appearance, Section::Notes, Section::Search];
+    pub const ALL: [Section; 4] = [
+        Section::Appearance,
+        Section::Editor,
+        Section::Notes,
+        Section::Search,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Section::Appearance => "Appearance",
+            Section::Editor => "Editor",
             Section::Notes => "Notes folder",
             Section::Search => "Search by meaning",
         }
@@ -144,6 +153,8 @@ pub enum Setting {
     EditorSize(u32),
     /// Where the top bar's labels go.
     Labels(Labels),
+    /// Emacs keys in the editor on or off.
+    EmacsKeys(bool),
     /// How search by meaning works.
     Model(ModelChoice),
     /// The server address field.
@@ -216,6 +227,7 @@ pub fn view(v: View<'_>) -> Element<'_, Message> {
     .width(170);
     let body = match v.panel.section {
         Section::Appearance => appearance(v.settings, v.installed),
+        Section::Editor => editor(v.settings),
         Section::Notes => notes(v.folder, v.config_path),
         Section::Search => search_section(v.panel, &v.search),
     };
@@ -329,6 +341,59 @@ fn appearance<'a>(s: &'a Settings, installed: Option<&Installed>) -> Element<'a,
     ]
     .spacing(10)
     .into()
+}
+
+/// The Emacs keys switch, and what the keys do.
+fn editor(s: &Settings) -> Element<'_, Message> {
+    let keys = [
+        ("C-f  C-b", "forward, back a character"),
+        ("C-n  C-p", "next, previous line"),
+        ("C-a  C-e", "start, end of the line"),
+        ("M-f  M-b", "forward, back a word"),
+        ("M-<  M->", "start, end of the text"),
+        ("C-d", "delete the next character"),
+        ("M-d  M-DEL", "kill the next, previous word"),
+        (
+            "C-k",
+            "kill to the end of the line (again: add the line break)",
+        ),
+        ("C-y", "yank: insert what was killed last"),
+    ];
+    let rows = keys.map(|(k, what)| {
+        row![
+            text(k).size(13).font(iced::Font::MONOSPACE).width(110),
+            text(what).size(13),
+        ]
+        .into()
+    });
+    let mut parts: Vec<Element<'_, Message>> = vec![
+        toggler(s.emacs_keys)
+            .label("Emacs keys")
+            .on_toggle(|on| send(Setting::EmacsKeys(on)))
+            .text_size(14)
+            .size(18)
+            .into(),
+        text(
+            "C is Ctrl (Control on macOS) and M is Alt (Option on macOS). Kills in a row \
+             add up, and C-y inserts them.",
+        )
+        .size(12)
+        .style(dim)
+        .into(),
+    ];
+    if s.emacs_keys {
+        parts.push(Column::from_iter(rows).spacing(4).into());
+        parts.push(
+            text(format!(
+                "Redo is {} while these are on, since C-y yanks.",
+                crate::topbar::shortcut(true, "Z")
+            ))
+                .size(12)
+                .style(dim)
+                .into(),
+        );
+    }
+    Column::with_children(parts).spacing(10).into()
 }
 
 /// The notes folder, and where the settings live.
