@@ -230,9 +230,10 @@ fn emacs<M>(press: &KeyPress, on: fn(Command) -> M) -> Option<Binding<M>> {
     })
 }
 
-/// The editor's key bindings: iced's defaults plus undo/redo, Escape to
-/// leave and Enter for list continuation; with `emacs`, the Emacs keys
-/// first (then C-y yanks, and redo is Ctrl+Shift+Z).
+/// The editor's key bindings: the app's shortcuts pass through, then
+/// iced's defaults plus undo/redo, paste (an image too), Escape to leave
+/// and Enter for list continuation; with `emacs`, the Emacs keys first
+/// (then C-y yanks, and redo is Ctrl+Shift+Z).
 pub fn bindings<M>(
     on: fn(Command) -> M,
     emacs_keys: bool,
@@ -242,6 +243,12 @@ pub fn bindings<M>(
             press.status,
             iced::widget::text_editor::Status::Focused { .. }
         ) {
+            return None;
+        }
+        // The app's own shortcuts go past the editor to the app.
+        if crate::keys::app_key(&press.key, press.physical_key, press.modifiers)
+            .is_some_and(crate::keys::AppKey::in_editor)
+        {
             return None;
         }
         if emacs_keys && let Some(b) = emacs(&press, on) {
@@ -259,7 +266,8 @@ pub fn bindings<M>(
             Key::Character(c) if m.command() && c.eq_ignore_ascii_case("y") => {
                 return Some(Binding::Custom(on(Command::Redo)));
             }
-            Key::Character(c) if m.command() && !m.shift() && c.eq_ignore_ascii_case("v") => {
+            // With Shift too: Ctrl+Shift+V is "paste image" outside the editor.
+            Key::Character(c) if m.command() && !m.alt() && c.eq_ignore_ascii_case("v") => {
                 return Some(Binding::Custom(on(Command::Paste)));
             }
             Key::Named(key::Named::Escape) => return Some(Binding::Custom(on(Command::Done))),
@@ -357,6 +365,16 @@ mod tests {
             Some(Binding::Move(Motion::WordRight))
         );
         // Undo and the plain keys still work.
+        // The app's shortcuts pass by; Ctrl+Shift+V pastes (an image too).
+        let both = CTRL | keyboard::Modifiers::SHIFT;
+        if cfg!(not(target_os = "macos")) {
+            assert_eq!(bind(press(ch("A"), NONE, both), true), None);
+            assert_eq!(bind(press(ch("N"), NONE, both), false), None);
+            assert_eq!(
+                bind(press(ch("V"), NONE, both), true),
+                Some(Binding::Custom(Command::Paste))
+            );
+        }
         assert_eq!(b("z", CTRL), Some(Binding::Custom(Command::Undo)));
         // Off: C-y redoes and C-a selects all, as before.
         assert_eq!(

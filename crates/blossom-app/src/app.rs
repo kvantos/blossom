@@ -46,6 +46,7 @@ use crate::draw::{self, DiagramEditor};
 use crate::editor::{self, Command};
 use crate::file::{DiskCopy, DiskState, Group, OpenFile, SectionEditor, Selected};
 use crate::fonts;
+use crate::keys::{self, AppKey};
 use crate::meaning;
 use crate::newfile::{self, NewFile, NewFileMsg};
 use crate::outline;
@@ -2020,7 +2021,13 @@ impl App {
     }
 
     fn on_key(&mut self, event: &keyboard::Event) -> Task<Message> {
-        let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
+        let keyboard::Event::KeyPressed {
+            key,
+            modifiers,
+            physical_key,
+            ..
+        } = event
+        else {
             return Task::none();
         };
         if self.diagram.is_some() {
@@ -2059,29 +2066,24 @@ impl App {
             }
         }
         let editing = self.file.as_ref().is_some_and(|f| f.editor.is_some());
-        if editing || self.capture.is_some() || self.refile.is_some() || !modifiers.command() {
+        let Some(action) = keys::app_key(key, *physical_key, *modifiers) else {
+            return Task::none();
+        };
+        if self.capture.is_some() || self.refile.is_some() || (editing && !action.in_editor()) {
             return Task::none();
         }
-        match key.as_ref() {
-            Key::Character(c) if c.eq_ignore_ascii_case("z") => self.undo(modifiers.shift()),
-            Key::Character(c) if c.eq_ignore_ascii_case("y") => self.undo(true),
-            Key::Character(c) if c.eq_ignore_ascii_case("e") => return self.start_editing(),
-            Key::Character(c) if c.eq_ignore_ascii_case("o") => {
-                return self.update(Message::PickFolder);
-            }
-            Key::Character(c) if c.eq_ignore_ascii_case("n") => return self.open_capture(),
-            Key::Character(",") => return self.on_setting(Setting::Open),
-            Key::Character("\\") => self.sidebar = !self.sidebar,
-            Key::Character(c) if c.eq_ignore_ascii_case("v") && !modifiers.shift() => {
-                return paste();
-            }
-            Key::Character(c) if c.eq_ignore_ascii_case("a") && modifiers.shift() => {
-                return self.update(Message::ShowAgenda);
-            }
-            Key::Character(c) if c.eq_ignore_ascii_case("f") && modifiers.shift() => {
-                return self.update(Message::ShowSearch);
-            }
-            _ => {}
+        match action {
+            AppKey::Undo => self.undo(false),
+            AppKey::Redo => self.undo(true),
+            AppKey::Edit if !editing => return self.start_editing(),
+            AppKey::Edit => {}
+            AppKey::OpenFolder => return self.update(Message::PickFolder),
+            AppKey::Capture => return self.open_capture(),
+            AppKey::Settings => return self.on_setting(Setting::Open),
+            AppKey::Sidebar => self.sidebar = !self.sidebar,
+            AppKey::PasteImage => return paste(),
+            AppKey::Agenda => return self.update(Message::ShowAgenda),
+            AppKey::Search => return self.update(Message::ShowSearch),
         }
         Task::none()
     }
@@ -3747,6 +3749,41 @@ mod tests {
         // Undo brings the kill back.
         let _ = a.update(Message::EditorCommand(Command::Undo));
         assert!(text_of(&a).starts_with("* one\n"), "{}", text_of(&a));
+    }
+
+    fn press(a: &mut App, c: &str, modifiers: keyboard::Modifiers) {
+        let _ = a.update(Message::Key(keyboard::Event::KeyPressed {
+            key: Key::Character(c.into()),
+            modified_key: Key::Character(c.into()),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        }));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn app_shortcuts_take_ctrl_shift_and_work_while_editing() {
+        use keyboard::Modifiers;
+        let both = Modifiers::CTRL | Modifiers::SHIFT;
+        let mut a = loaded("* one\nbody\n");
+        let _ = a.update(Message::Select(Selected::Heading(0)));
+        // Plain Ctrl+E no longer edits; Ctrl+Shift+E does.
+        press(&mut a, "e", Modifiers::CTRL);
+        assert!(a.file.as_ref().unwrap().editor.is_none());
+        press(&mut a, "E", both);
+        assert!(a.file.as_ref().unwrap().editor.is_some());
+        // While editing: the agenda, the sidebar and Settings still answer.
+        press(&mut a, "A", both);
+        assert_eq!(a.view, View::Agenda);
+        press(&mut a, "\\", Modifiers::CTRL);
+        assert!(!a.sidebar);
+        press(&mut a, ",", Modifiers::CTRL);
+        assert!(a.settings_panel.is_some());
     }
 
     #[test]

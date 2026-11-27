@@ -386,11 +386,11 @@ fn editor(s: &Settings) -> Element<'_, Message> {
         parts.push(
             text(format!(
                 "Redo is {} while these are on, since C-y yanks.",
-                crate::topbar::shortcut(true, "Z")
+                crate::keys::AppKey::Redo.hint()
             ))
-                .size(12)
-                .style(dim)
-                .into(),
+            .size(12)
+            .style(dim)
+            .into(),
         );
     }
     Column::with_children(parts).spacing(10).into()

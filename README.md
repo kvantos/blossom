@@ -123,6 +123,24 @@ what it does; remove the `#` in front of one to change it. The app applies
 changes you make there while it runs, and writes the choices you make in the
 app back to the same file without touching your comments.
 
+### Keys
+
+On Linux the app's own keys take Ctrl+Shift, so plain Ctrl keys are free
+for editing (Emacs keys such as Ctrl+A, Ctrl+E and Ctrl+K are on by default;
+**Settings → Editor** turns them off). On macOS they take ⌘.
+
+| Action             | Linux            | macOS |
+|--------------------|------------------|-------|
+| Capture a note     | Ctrl+Shift+N     | ⌘N    |
+| Edit the section   | Ctrl+Shift+E     | ⌘E    |
+| Open a folder      | Ctrl+Shift+O     | ⌘O    |
+| Paste an image     | Ctrl+Shift+V     | ⌘V    |
+| Agenda             | Ctrl+Shift+A     | ⇧⌘A   |
+| Search             | Ctrl+Shift+F     | ⇧⌘F   |
+| Settings           | Ctrl+,           | ⌘,    |
+| Show/hide sidebar  | Ctrl+\\          | ⌘\\    |
+| Undo / redo        | Ctrl+Z / Ctrl+Shift+Z | ⌘Z / ⇧⌘Z |
+
 ## Licence
 
 MIT, see [LICENSE](LICENSE).

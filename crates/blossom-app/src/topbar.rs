@@ -11,6 +11,7 @@ use iced::{Element, Fill, Theme};
 use serde::{Deserialize, Serialize};
 
 use crate::app::Message;
+use crate::keys::AppKey;
 use crate::search;
 use crate::settings_panel::Setting;
 use crate::style;
@@ -62,17 +63,6 @@ static SIDEBAR: LazyLock<svg::Handle> = LazyLock::new(|| handle(icon::SIDEBAR));
 static AGENDA: LazyLock<svg::Handle> = LazyLock::new(|| handle(icon::AGENDA));
 static CAPTURE: LazyLock<svg::Handle> = LazyLock::new(|| handle(icon::CAPTURE));
 static SETTINGS: LazyLock<svg::Handle> = LazyLock::new(|| handle(icon::SETTINGS));
-
-/// A shortcut as this platform writes it: `shortcut(true, "A")` is
-/// Ctrl+Shift+A, or ⇧⌘A on macOS.
-#[must_use]
-pub fn shortcut(shift: bool, key: &str) -> String {
-    if cfg!(target_os = "macos") {
-        format!("{}⌘{key}", if shift { "⇧" } else { "" })
-    } else {
-        format!("Ctrl+{}{key}", if shift { "Shift+" } else { "" })
-    }
-}
 
 /// What the top bar shows.
 pub struct Bar<'a> {
@@ -157,7 +147,7 @@ pub fn view(bar: &Bar<'_>) -> Element<'static, Message> {
     let field: Element<'static, Message> = if labels == Labels::None {
         tooltip(
             field,
-            container(text(format!("Search ({})", shortcut(true, "F"))).size(12))
+            container(text(format!("Search ({})", AppKey::Search.hint())).size(12))
                 .padding([3, 8])
                 .style(style::modal),
             tooltip::Position::Bottom,
@@ -171,7 +161,7 @@ pub fn view(bar: &Bar<'_>) -> Element<'static, Message> {
     let sidebar_hint = format!(
         "{} the sidebar ({})",
         if bar.sidebar { "Hide" } else { "Show" },
-        shortcut(false, "\\")
+        AppKey::Sidebar.hint()
     );
     container(
         row![
@@ -189,7 +179,7 @@ pub fn view(bar: &Bar<'_>) -> Element<'static, Message> {
                 labels,
                 &AGENDA,
                 "Agenda",
-                format!("Agenda ({})", shortcut(true, "A")),
+                format!("Agenda ({})", AppKey::Agenda.hint()),
                 Message::ShowAgenda,
                 bar.agenda,
             ),
@@ -197,7 +187,7 @@ pub fn view(bar: &Bar<'_>) -> Element<'static, Message> {
                 labels,
                 &CAPTURE,
                 "Capture",
-                format!("Capture a note ({})", shortcut(false, "N")),
+                format!("Capture a note ({})", AppKey::Capture.hint()),
                 Message::OpenCapture,
                 false,
             ),
@@ -205,7 +195,7 @@ pub fn view(bar: &Bar<'_>) -> Element<'static, Message> {
                 labels,
                 &SETTINGS,
                 "Settings",
-                format!("Settings ({})", shortcut(false, ",")),
+                format!("Settings ({})", AppKey::Settings.hint()),
                 Message::Setting(Setting::Open),
                 false,
             ),
@@ -228,16 +218,6 @@ mod tests {
         for svg in [icon::SIDEBAR, icon::AGENDA, icon::CAPTURE, icon::SETTINGS] {
             assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"));
             assert_eq!(svg.matches('<').count(), svg.matches('>').count());
-        }
-    }
-
-    #[test]
-    fn shortcuts() {
-        if cfg!(target_os = "macos") {
-            assert_eq!(shortcut(true, "A"), "⇧⌘A");
-        } else {
-            assert_eq!(shortcut(true, "A"), "Ctrl+Shift+A");
-            assert_eq!(shortcut(false, ","), "Ctrl+,");
         }
     }
 }
