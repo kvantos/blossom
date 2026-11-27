@@ -121,6 +121,60 @@ fn columns(scope: Scope, from: NaiveDate, to: NaiveDate) -> Vec<(NaiveDate, u16,
     out
 }
 
+/// Where the timeline draws its tick lines, as day offsets from `from`
+/// with whether the line is a strong one: days in Week, weeks in Month and
+/// Quarter (months strong in Quarter), months in Year (quarters strong).
+fn ticks(v: &View<'_>, from: NaiveDate, to: NaiveDate) -> Vec<(u16, bool)> {
+    let mut out = Vec::new();
+    let mut d = from + Days::new(1);
+    while d <= to {
+        let week = v.prefs.week_of(d) == d;
+        let month = d.day() == 1;
+        let quarter = month && d.month0().is_multiple_of(3);
+        let line = match v.place.scope {
+            Scope::Week => Some(false),
+            Scope::Month => week.then_some(false),
+            Scope::Quarter => (week || month).then_some(month),
+            Scope::Year => month.then_some(quarter),
+        };
+        if let Some(strong) = line {
+            out.push((offset(from, d), strong));
+        }
+        d = d + Days::new(1);
+    }
+    out
+}
+
+/// The tick lines as a layer behind a row's bar.
+fn grid<'a>(v: &View<'a>, from: NaiveDate, to: NaiveDate) -> Element<'a, Message> {
+    let n = days(from, to);
+    let mut cells: Vec<Element<'a, Message>> = Vec::new();
+    let mut at = 0u16;
+    let mut strong_line = None;
+    for (off, strong) in ticks(v, from, to).into_iter().chain([(n, false)]) {
+        if off > at {
+            let mut cell = Row::new().height(34);
+            if let Some(strong) = strong_line {
+                cell = cell.push(container(space()).width(1).height(Fill).style(
+                    move |theme: &Theme| {
+                        let p = theme.extended_palette();
+                        let bg = p.background.base.color;
+                        let t = if strong { 0.9 } else { 0.4 };
+                        container::Style {
+                            background: Some(style::mix(bg, p.background.strong.color, t).into()),
+                            ..container::Style::default()
+                        }
+                    },
+                ));
+            }
+            cells.push(container(cell).width(Length::FillPortion(off - at)).into());
+        }
+        at = off;
+        strong_line = Some(strong);
+    }
+    Row::from_iter(cells).height(34).into()
+}
+
 /// The spans touching the shown days, and the summary counts.
 fn summary(spans: &[&Span], today: NaiveDate) -> (usize, usize, usize) {
     let open: Vec<Status> = spans
@@ -302,6 +356,7 @@ fn track<'a>(s: &'a Span, v: &View<'a>, from: NaiveDate, to: NaiveDate) -> Eleme
                 s,
                 s.start < from,
                 s.end > to,
+                s.late(v.today).is_some(),
                 v.slot(&s.note.record.path),
             ))
             .width(Length::FillPortion(len))
@@ -327,8 +382,9 @@ fn track<'a>(s: &'a Span, v: &View<'a>, from: NaiveDate, to: NaiveDate) -> Eleme
     if rest > 0 {
         bars.push(gap(rest));
     }
-    // Today's line goes under the bars, so their names stay readable.
-    let mut layers: Vec<Element<'a, Message>> = Vec::new();
+    // Tick lines, then today's line, under the bars so their names stay
+    // readable.
+    let mut layers: Vec<Element<'a, Message>> = vec![grid(v, from, to)];
     if (from..=to).contains(&v.today) {
         let off = offset(from, v.today);
         layers.push(
@@ -366,6 +422,7 @@ fn bar<'a>(
     s: &'a Span,
     clipped_left: bool,
     clipped_right: bool,
+    late: bool,
     slot: usize,
 ) -> Element<'a, Message> {
     let mut layers: Vec<Element<'a, Message>> = Vec::new();
@@ -408,6 +465,29 @@ fn bar<'a>(
         );
     }
     layers.push(line.into());
+    // A mark on the DEADLINE, red once it's passed.
+    if s.planned && !clipped_right {
+        layers.push(
+            row![
+                space::horizontal(),
+                container(space())
+                    .width(4)
+                    .height(Fill)
+                    .style(move |theme: &Theme| container::Style {
+                        background: Some(
+                            if late {
+                                theme.extended_palette().danger.base.color
+                            } else {
+                                colour(theme, slot)
+                            }
+                            .into(),
+                        ),
+                        ..container::Style::default()
+                    }),
+            ]
+            .into(),
+        );
+    }
     let done = s.note.record.done;
     let content = container(stack(layers).width(Fill).height(22))
         .width(Fill)
