@@ -4,7 +4,7 @@
 # tarball beside this file first, so makepkg uses it instead of downloading;
 # for the AUR, replace SKIP with the tarball's sha256sum.
 pkgname=blossom
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="Org mode notes, tasks and agenda (desktop app and blsm CLI)"
 arch=('x86_64' 'aarch64')

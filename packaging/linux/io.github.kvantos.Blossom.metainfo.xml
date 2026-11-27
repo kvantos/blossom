@@ -12,7 +12,8 @@
     </p>
     <ul>
       <li>Outline, reading view and a section editor that changes only what you edit</li>
-      <li>Search with Orgzly-style queries and an agenda of scheduled items and deadlines</li>
+      <li>Search with Orgzly-style queries, or by meaning</li>
+      <li>An agenda by week, month, quarter or year, with a timeline of ongoing work</li>
       <li>Capture templates, refile and archive with undo</li>
       <li>Inline images and diagrams stored as Excalidraw files</li>
     </ul>
@@ -30,6 +31,14 @@
     <binary>blsm</binary>
   </provides>
   <releases>
+    <release version="0.3.0" date="2026-11-27">
+      <description>
+        <p>A reworked interface: a top bar, a Settings panel that writes config.toml,
+        a new agenda with Week, Month, Quarter and Year views and an Ongoing
+        timeline, capture in the full editor, a formatting toolbar, and Emacs keys
+        in the editor.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-11-25"/>
     <release version="0.1.0" date="2026-11-24"/>
   </releases>
