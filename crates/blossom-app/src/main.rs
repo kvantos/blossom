@@ -14,6 +14,7 @@ mod excalidraw;
 mod file;
 mod fonts;
 mod meaning;
+mod newfile;
 mod outline;
 mod panels;
 mod read;

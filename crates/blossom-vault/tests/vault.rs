@@ -351,6 +351,32 @@ mod ops {
     }
 
     #[test]
+    fn new_file_names() {
+        use blossom_vault::ops::{new_file_path, new_file_text};
+        let ok = |s: &str| new_file_path(s).unwrap();
+        assert_eq!(ok("garden"), "garden.org");
+        assert_eq!(ok(" projects/garden "), "projects/garden.org");
+        assert_eq!(ok("/projects//garden.ORG"), "projects/garden.ORG");
+        assert_eq!(ok("a\\b"), "a/b.org");
+        assert_eq!(ok("notes.txt"), "notes.txt.org");
+        for bad in [
+            "",
+            "  ",
+            ".org",
+            "projects/",
+            "../x",
+            "a/./b",
+            ".hidden",
+            "a/.git/x",
+            "a/ /b",
+        ] {
+            assert!(new_file_path(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(new_file_text(""), "");
+        assert_eq!(new_file_text("  My   garden "), "#+TITLE: My garden\n");
+    }
+
+    #[test]
     fn refile_within_a_file_spelled_differently() {
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();
@@ -410,6 +436,19 @@ mod ops {
         assert_eq!(read(r, "new/journal.org"), "* hello\nbody\n");
         v.restore(&out.changes).unwrap();
         assert!(!r.join("new/journal.org").exists());
+        // A new file: created with its folder, undone by deleting it.
+        let out = v
+            .create_file("projects/garden.org", "#+TITLE: Garden\n")
+            .unwrap();
+        assert_eq!(out.message, "Created projects/garden.org");
+        assert_eq!(read(r, "projects/garden.org"), "#+TITLE: Garden\n");
+        let again = v.create_file("projects/garden.org", "").unwrap_err();
+        assert!(again.to_string().contains("exists already"), "{again}");
+        assert_eq!(read(r, "projects/garden.org"), "#+TITLE: Garden\n");
+        v.restore(&out.changes).unwrap();
+        assert!(!r.join("projects/garden.org").exists());
+        let out = v.create_file("empty.org", "").unwrap();
+        assert_eq!((read(r, "empty.org"), out.heading), (String::new(), None));
         let missing = Target::Heading {
             id: None,
             path: vec!["Nope".into()],

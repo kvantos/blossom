@@ -107,6 +107,13 @@ pub enum Op {
     },
     /// Archive a heading.
     Archive(HeadingRef),
+    /// Create a file holding `text`.
+    CreateFile {
+        /// The new file.
+        file: String,
+        /// Its text.
+        text: String,
+    },
     /// Add a capture entry.
     Capture {
         /// Target file.
@@ -928,6 +935,7 @@ fn run_op(o: &Open, op: Op) -> Result<Outcome, OpError> {
             target,
             entry,
         } => o.vault.capture(&file, &target, &entry, now.date()),
+        Op::CreateFile { file, text } => o.vault.create_file(&file, &text),
     }
 }
 
@@ -1452,6 +1460,48 @@ about the milk run
             fs::read_to_string(vault.join("a.org")).unwrap(),
             "* one\n* from emacs\n"
         );
+    }
+
+    #[test]
+    fn new_files_are_created_listed_and_undone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, vault) = opened(dir.path(), &[("a.org", "* one\n")]);
+        // A new file: written, listed, and undone by deleting it.
+        h.send(Request::Run(Op::CreateFile {
+            file: "work/garden.org".into(),
+            text: "#+TITLE: Garden\n".into(),
+        }));
+        let files = h.wait(|e| match e {
+            Event::Files(f) => Some(f),
+            Event::Error(e) => panic!("{e}"),
+            _ => None,
+        });
+        assert!(files.iter().any(|f| f.path == "work/garden.org"));
+        let out = h.wait(|e| match e {
+            Event::Done(out) => Some(out),
+            Event::Error(e) => panic!("{e}"),
+            _ => None,
+        });
+        assert_eq!(
+            fs::read_to_string(vault.join("work/garden.org")).unwrap(),
+            "#+TITLE: Garden\n"
+        );
+        h.send(Request::Run(Op::CreateFile {
+            file: "work/garden.org".into(),
+            text: String::new(),
+        }));
+        let e = h.wait(|e| match e {
+            Event::Error(e) => Some(e),
+            _ => None,
+        });
+        assert!(e.contains("exists already"), "{e}");
+        h.send(Request::Restore(out.changes.clone()));
+        h.wait(|e| match e {
+            Event::Restored(_) => Some(()),
+            Event::Error(e) => panic!("{e}"),
+            _ => None,
+        });
+        assert!(!vault.join("work/garden.org").exists());
     }
 
     #[test]

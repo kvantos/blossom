@@ -5,7 +5,8 @@
 //! `BLOSSOM_SCREENSHOT_SEARCH` (a query, may be empty; by meaning with
 //! `BLOSSOM_SCREENSHOT_MEANING`), opens the Settings panel with
 //! `BLOSSOM_SCREENSHOT_APPEARANCE` (at section `notes` or `search` with
-//! `BLOSSOM_SCREENSHOT_SECTION`), saves a screenshot of the window as
+//! `BLOSSOM_SCREENSHOT_SECTION`), opens the "New file" form with a name
+//! typed with `BLOSSOM_SCREENSHOT_NEW_FILE`, saves a screenshot of the window as
 //! PNG and exits. `BLOSSOM_THEME` (`light`, `dark`, or
 //! `solarized-`/`gray-` + `light`/`dark`) overrides the saved theme. Used
 //! to check the UI without a screenshot tool; not part of normal use.
@@ -39,6 +40,8 @@ pub struct Plan {
     pub capture: bool,
     /// Open the Settings panel before capturing.
     pub appearance: bool,
+    /// Open the "New file" form with this name typed.
+    pub new_file: Option<String>,
     /// The Settings section to show.
     pub section: Option<crate::settings_panel::Section>,
     /// Open this diagram (a link path in the file) before capturing.
@@ -85,6 +88,7 @@ impl Plan {
             meaning: std::env::var_os("BLOSSOM_SCREENSHOT_MEANING").is_some(),
             capture: std::env::var_os("BLOSSOM_SCREENSHOT_CAPTURE").is_some(),
             appearance: std::env::var_os("BLOSSOM_SCREENSHOT_APPEARANCE").is_some(),
+            new_file: std::env::var("BLOSSOM_SCREENSHOT_NEW_FILE").ok(),
             section: std::env::var("BLOSSOM_SCREENSHOT_SECTION")
                 .ok()
                 .and_then(|s| match s.as_str() {

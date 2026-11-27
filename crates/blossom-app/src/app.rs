@@ -47,6 +47,7 @@ use crate::editor::{self, Command};
 use crate::file::{DiskCopy, DiskState, Group, OpenFile, SectionEditor, Selected};
 use crate::fonts;
 use crate::meaning;
+use crate::newfile::{self, NewFile, NewFileMsg};
 use crate::outline;
 use crate::panels::{self, CapturePanel, RefilePicker};
 use crate::read::{self, Actions, Ink, Picture};
@@ -90,6 +91,8 @@ pub struct App {
     settings_panel: Option<settings_panel::Panel>,
     /// The sidebar is shown.
     sidebar: bool,
+    /// The sidebar's "New file" form, when open.
+    new_file: Option<NewFile>,
     /// The installed fonts, once read for the Settings panel.
     fonts: Option<Arc<fonts::Installed>>,
     worker: Option<Handle>,
@@ -157,6 +160,8 @@ enum Awaiting {
     Nothing,
     /// A capture.
     Capture,
+    /// A new file.
+    NewFile,
     /// A diagram.
     Diagram,
 }
@@ -265,6 +270,8 @@ pub enum Message {
     Setting(Setting),
     /// Show or hide the sidebar.
     ToggleSidebar,
+    /// The "New file" form.
+    NewFile(NewFileMsg),
     /// Capture: choose a template, by its label.
     CaptureTemplate(String),
     /// Capture: answer prompt N.
@@ -337,6 +344,7 @@ impl App {
             config_path,
             settings_panel: None,
             sidebar: true,
+            new_file: None,
             fonts: None,
             worker: None,
             vault_exists: open.is_some() || typed_folder_exists(DEFAULT_FOLDER),
@@ -558,6 +566,42 @@ impl App {
         }
     }
 
+    /// The "New file" form's messages.
+    fn on_new_file(&mut self, message: NewFileMsg) -> Task<Message> {
+        match message {
+            NewFileMsg::Open => {
+                self.sidebar = true;
+                self.new_file = Some(NewFile::default());
+                return iced::widget::operation::focus(newfile::NAME);
+            }
+            NewFileMsg::Name(name) => {
+                if let Some(f) = &mut self.new_file {
+                    f.name = name;
+                }
+            }
+            NewFileMsg::Title(title) => {
+                if let Some(f) = &mut self.new_file {
+                    f.title = title;
+                }
+            }
+            NewFileMsg::Create => {
+                let Some(f) = &self.new_file else {
+                    return Task::none();
+                };
+                match f.target(&self.files) {
+                    Ok(file) => {
+                        let text = blossom_vault::ops::new_file_text(&f.title);
+                        self.awaiting = Awaiting::NewFile;
+                        self.run(Op::CreateFile { file, text });
+                    }
+                    Err(why) => self.status = Some(why),
+                }
+            }
+            NewFileMsg::Cancel => self.new_file = None,
+        }
+        Task::none()
+    }
+
     /// The top bar's search field changed: show the search screen for it.
     fn search_typed(&mut self, input: String) {
         self.view = View::Search;
@@ -689,6 +733,7 @@ impl App {
             Message::Mode(mode) => self.system = mode,
             Message::Setting(m) => return self.on_setting(m),
             Message::ToggleSidebar => self.sidebar = !self.sidebar,
+            Message::NewFile(m) => return self.on_new_file(m),
             Message::VaultInput(s) => {
                 self.vault_input = s;
                 self.vault_exists = typed_folder_exists(&self.vault_input);
@@ -1266,6 +1311,12 @@ impl App {
                     self.awaiting = Awaiting::Nothing;
                     self.capture = None;
                 }
+                if self.awaiting == Awaiting::NewFile {
+                    self.awaiting = Awaiting::Nothing;
+                    self.new_file = None;
+                    self.view = View::Files;
+                    self.select_file(out.path.clone());
+                }
                 self.notice = Some((out.message.clone(), Some(out.changes.clone())));
             }
             Event::Restored(msg) => self.notice = Some((msg, None)),
@@ -1430,7 +1481,7 @@ impl App {
         let paths: Vec<&str> = match &op {
             Op::Complete(h, _) | Op::Archive(h) => vec![h.path.as_str()],
             Op::Refile { heading, file, .. } => vec![heading.path.as_str(), file.as_str()],
-            Op::Capture { file, .. } => vec![file.as_str()],
+            Op::Capture { file, .. } | Op::CreateFile { file, .. } => vec![file.as_str()],
         };
         if let Some(p) = paths
             .iter()
@@ -1873,7 +1924,7 @@ impl App {
             return Task::none();
         }
         if matches!(key, Key::Named(keyboard::key::Named::Escape)) {
-            if self.settings_panel.take().is_some() {
+            if self.settings_panel.take().is_some() || self.new_file.take().is_some() {
                 return Task::none();
             }
             if self.refile.take().is_some() {
@@ -1945,6 +1996,10 @@ impl App {
             // Captured once the diagram arrives.
             self.image_action(path.clone());
             return Task::none();
+        }
+        if let Some(name) = &plan.new_file {
+            let _ = self.on_new_file(NewFileMsg::Open);
+            let _ = self.on_new_file(NewFileMsg::Name(name.clone()));
         }
         if plan.appearance {
             let _ = self.on_setting(Setting::Open);
@@ -2253,6 +2308,8 @@ impl App {
             }),
             rule::horizontal(1),
             scrollable(Column::with_children(rows).spacing(1).padding([6, 6])).height(Fill),
+            rule::horizontal(1),
+            newfile::view(self.new_file.as_ref(), &self.files),
         ]
         .into()
     }
@@ -3124,6 +3181,53 @@ mod tests {
         let _ = a.update(Message::SearchInput("t.work".into()));
         assert_eq!((a.view, a.search_input.as_str()), (View::Search, "t.work"));
         let _ = a.view();
+    }
+
+    #[test]
+    fn new_file_form_creates_and_opens_the_file() {
+        use blossom_vault::ops::{Change, Outcome};
+        let mut a = app();
+        a.root = Some(PathBuf::from("/v"));
+        a.files = Arc::new(vec![FileInfo {
+            path: "inbox.org".into(),
+            headings: 0,
+            open_tasks: 0,
+            conflict: false,
+        }]);
+        a.sidebar = false;
+        let _ = a.update(Message::NewFile(NewFileMsg::Open));
+        assert!(a.sidebar, "the form is in the sidebar");
+        // An existing name isn't created.
+        let _ = a.update(Message::NewFile(NewFileMsg::Name("Inbox".into())));
+        let _ = a.update(Message::NewFile(NewFileMsg::Create));
+        assert_eq!(a.awaiting, Awaiting::Nothing);
+        assert!(a.status.as_deref().unwrap().contains("exists"));
+        let _ = a.view();
+        let _ = a.update(Message::NewFile(NewFileMsg::Name("work/garden".into())));
+        let _ = a.update(Message::NewFile(NewFileMsg::Title("Garden".into())));
+        let _ = a.update(Message::NewFile(NewFileMsg::Create));
+        assert_eq!(a.awaiting, Awaiting::NewFile);
+        let _ = a.update(Message::Worker(Event::Done(Arc::new(Outcome {
+            changes: vec![Change {
+                path: "work/garden.org".into(),
+                before: None,
+                after: "#+TITLE: Garden\n".into(),
+            }],
+            path: "work/garden.org".into(),
+            heading: None,
+            line: 1,
+            message: "Created work/garden.org".into(),
+        }))));
+        assert!(a.new_file.is_none());
+        assert_eq!(
+            a.file.as_ref().map(|f| f.path.as_str()),
+            Some("work/garden.org")
+        );
+        assert!(a.notice.is_some(), "with undo");
+        // Cancel closes the form.
+        let _ = a.update(Message::NewFile(NewFileMsg::Open));
+        let _ = a.update(Message::NewFile(NewFileMsg::Cancel));
+        assert!(a.new_file.is_none());
     }
 
     #[test]

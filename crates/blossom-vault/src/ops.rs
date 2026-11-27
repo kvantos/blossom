@@ -214,6 +214,34 @@ impl Vault {
         })
     }
 
+    /// Creates `file` (vault-relative, from [`new_file_path`]) holding
+    /// `text`. Refused when it exists already, in any spelling the disk
+    /// treats as the same. Undo ([`Vault::restore`]) deletes it again.
+    ///
+    /// # Errors
+    ///
+    /// [`OpError::Nothing`] when the file exists, or a write error.
+    pub fn create_file(&self, file: &str, text: &str) -> Result<Outcome, OpError> {
+        if self.revision(file)?.is_some() {
+            return Err(OpError::Nothing(format!("{file} exists already")));
+        }
+        self.write(file, text, None).map_err(|e| match e {
+            WriteError::Stale { .. } => OpError::Nothing(format!("{file} exists already")),
+            e => OpError::Write(e),
+        })?;
+        Ok(Outcome {
+            changes: vec![Change {
+                path: file.to_string(),
+                before: None,
+                after: text.to_string(),
+            }],
+            path: file.to_string(),
+            heading: None,
+            line: 1,
+            message: format!("Created {file}"),
+        })
+    }
+
     /// Completes an agenda entry: see [`Complete`].
     ///
     /// # Errors
@@ -431,5 +459,66 @@ impl Vault {
             }
         }
         Ok(())
+    }
+}
+
+/// The vault-relative path for a new file typed as `input`: `garden` is
+/// `garden.org`, `projects/garden` is `projects/garden.org` (the folder is
+/// made when the file is written). Backslashes count as slashes and leading
+/// slashes are dropped.
+///
+/// # Errors
+///
+/// A message for the person typing: nothing typed, a folder rather than a
+/// file, `..`, or a name starting with `.` (such files and folders are
+/// hidden from the file list).
+pub fn new_file_path(input: &str) -> Result<String, String> {
+    let input = input.trim().replace('\\', "/");
+    let input = input.trim_start_matches('/');
+    if input.is_empty() {
+        return Err("Type a name for the file".to_string());
+    }
+    if input.ends_with('/') {
+        return Err("Type a file name after the folder".to_string());
+    }
+    let mut parts = Vec::new();
+    for part in input.split('/').filter(|p| !p.is_empty()) {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err("A folder name can't be only spaces".to_string());
+        }
+        if part == ".." || part == "." {
+            return Err("Use folder names, not . or ..".to_string());
+        }
+        if part.starts_with('.') {
+            return Err(format!(
+                "{part} starts with a dot, which hides it from the file list"
+            ));
+        }
+        if part.chars().any(char::is_control) {
+            return Err("The name has a control character".to_string());
+        }
+        parts.push(part);
+    }
+    let mut path = parts.join("/");
+    let has_org = path.len() > 4
+        && path
+            .get(path.len() - 4..)
+            .is_some_and(|e| e.eq_ignore_ascii_case(".org"));
+    if !has_org {
+        path.push_str(".org");
+    }
+    Ok(path)
+}
+
+/// The text of a new file: a `#+TITLE:` line when `title` isn't blank,
+/// else nothing.
+#[must_use]
+pub fn new_file_text(title: &str) -> String {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() {
+        String::new()
+    } else {
+        format!("#+TITLE: {title}\n")
     }
 }
