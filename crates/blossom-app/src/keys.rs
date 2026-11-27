@@ -107,7 +107,7 @@ pub fn app_key(key: &Key, physical: Physical, m: Modifiers) -> Option<AppKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::keyboard::key::{Code, NativeCode};
+    use iced::keyboard::key::NativeCode;
 
     fn k(s: &str, m: Modifiers) -> Option<AppKey> {
         app_key(
@@ -120,6 +120,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn linux_keys() {
+        use iced::keyboard::key::Code;
         let ctrl = Modifiers::CTRL;
         let both = Modifiers::CTRL | Modifiers::SHIFT;
         assert_eq!(k("N", both), Some(AppKey::Capture));

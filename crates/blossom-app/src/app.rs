@@ -4227,6 +4227,8 @@ mod tests {
         assert!(text_of(&a).starts_with("* one\n"), "{}", text_of(&a));
     }
 
+    /// Only the Linux key test uses it (macOS takes ⌘ instead).
+    #[cfg(not(target_os = "macos"))]
     fn press(a: &mut App, c: &str, modifiers: keyboard::Modifiers) {
         let _ = a.update(Message::Key(keyboard::Event::KeyPressed {
             key: Key::Character(c.into()),
