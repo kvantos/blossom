@@ -77,13 +77,9 @@ Point Blossom at your folder of org files:
 blossom ~/notes
 ```
 
-or set it once in `~/.config/blossom/config.toml`:
-
-```toml
-vault = "~/notes"
-```
-
-Then `blossom` opens it, and `blsm` uses it too:
+or just run `blossom` and choose the folder. Blossom remembers it in
+`~/.config/blossom/config.toml`, so `blossom` opens it next time and `blsm`
+uses it too:
 
 ```sh
 blsm search i.todo t.work   # open tasks tagged work
@@ -118,6 +114,14 @@ model = "multilingual"        # about 100 languages (488 MB)
 # server_model = "nomic-embed-text"
 # api_key_env = "OPENAI_API_KEY"   # the variable that holds the key, if one is needed
 ```
+
+### Settings
+
+Every setting is in `~/.config/blossom/config.toml`. Blossom creates it the
+first time it runs, listing every option at its default with a line saying
+what it does; remove the `#` in front of one to change it. The app applies
+changes you make there while it runs, and writes the choices you make in the
+app back to the same file without touching your comments.
 
 ## Licence
 

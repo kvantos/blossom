@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 use blossom_core::capture::{Target, TreeType};
 use serde::Deserialize;
 
+pub mod edit;
+
 /// The settings file. Every field is optional.
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// The vault folder (`~` is expanded).
@@ -33,6 +35,27 @@ pub struct Config {
     pub attachments: Option<String>,
     /// Semantic search (`[semantic]`).
     pub semantic: SemanticConfig,
+    /// The app's colours and fonts (`[appearance]`).
+    pub appearance: AppearanceConfig,
+}
+
+/// The `[appearance]` table, read by the app. Every field is optional; the
+/// app checks the values and falls back to its defaults.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AppearanceConfig {
+    /// `blossom` (default), `solarized` or `gray`.
+    pub colours: Option<String>,
+    /// `system` (default), `light` or `dark`.
+    pub mode: Option<String>,
+    /// The note text's font family; none or empty for the default.
+    pub read_font: Option<String>,
+    /// The note text's size in pixels.
+    pub read_size: Option<u32>,
+    /// The editor's font family; none or empty for the default.
+    pub editor_font: Option<String>,
+    /// The editor's size in pixels.
+    pub editor_size: Option<u32>,
 }
 
 /// The `[semantic]` table. Every field is optional; with none, search by
@@ -275,6 +298,21 @@ pub fn expand(path: &str) -> PathBuf {
     }
 }
 
+/// `path` as written in the config: `~/…` when it is in the home folder,
+/// so the file still works after the home folder moves.
+#[must_use]
+pub fn contract(path: &Path) -> String {
+    contract_in(path, home().as_deref())
+}
+
+fn contract_in(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) if rest.to_str().is_some() => format!("~/{}", rest.display()),
+        _ => path.display().to_string(),
+    }
+}
+
 /// The index folder for a vault: under the platform cache folder, one per
 /// vault, named after the folder plus a stable hash of its full path.
 #[must_use]
@@ -383,6 +421,22 @@ mod tests {
         let bad: Config =
             toml::from_str("[[capture]]\nkey = \"x\"\ntarget = \"heading\"\n").unwrap();
         assert!(bad.templates().is_err());
+    }
+
+    #[test]
+    fn contract_home() {
+        let home = Path::new("/home/me");
+        assert_eq!(
+            contract_in(Path::new("/home/me/Notes"), Some(home)),
+            "~/Notes"
+        );
+        assert_eq!(contract_in(Path::new("/home/me"), Some(home)), "~");
+        assert_eq!(
+            contract_in(Path::new("/home/meg/x"), Some(home)),
+            "/home/meg/x"
+        );
+        assert_eq!(contract_in(Path::new("/srv/n"), None), "/srv/n");
+        assert_eq!(expand(&contract(Path::new("/srv/n"))), Path::new("/srv/n"));
     }
 
     #[test]

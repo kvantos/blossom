@@ -22,7 +22,7 @@
 //! the main area.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use blossom_core::editing::{self, ListContinue};
@@ -58,6 +58,7 @@ use crate::style::Colours;
 use crate::style::{self, Chip};
 use crate::tree::{self, FileInfo};
 use crate::worker::{self, Event, Handle, Op, OpenVault, Request, SearchResults};
+use blossom_vault::config::{self, Config, edit};
 
 /// How many times a stopped worker is restarted before edits are written
 /// directly for the rest of the session.
@@ -77,10 +78,13 @@ const DEFAULT_FOLDER: &str = "~/Notes";
 pub struct App {
     /// The system's light/dark mode; `Mode::None` until known.
     system: Mode,
-    /// The remembered theme choice.
+    /// The appearance choices, from the config's `[appearance]`.
     settings: Settings,
-    /// Where `settings` is saved; `None` in tests.
-    settings_path: Option<PathBuf>,
+    /// The config as last read, to tell what a hand edit changed.
+    config: Config,
+    /// `config.toml`, which the app watches and writes choices to; `None`
+    /// in tests.
+    config_path: Option<PathBuf>,
     /// The Appearance panel is open.
     appearance: bool,
     /// The installed fonts, once read for the Appearance panel.
@@ -180,6 +184,8 @@ pub enum Message {
     PickFolder,
     /// The folder picker closed.
     Picked(Option<PathBuf>),
+    /// `config.toml` changed on disk.
+    ConfigChanged,
     /// Fold or unfold a folder in the tree.
     ToggleFolder(String),
     /// Show a file's outline.
@@ -310,8 +316,9 @@ impl App {
         template: OpenVault,
         today: NaiveDate,
         shot: Option<shot::Plan>,
-        (settings, settings_path): (Settings, Option<PathBuf>),
+        (config, config_path): (Config, Option<PathBuf>),
     ) -> (App, Task<Message>) {
+        let (settings, problems) = Settings::from_config(&config.appearance);
         let forced = shot.as_ref().and_then(|p| p.mode);
         let search_input = shot
             .as_ref()
@@ -321,7 +328,8 @@ impl App {
         let app = App {
             system: Mode::None,
             settings,
-            settings_path,
+            config,
+            config_path,
             appearance: false,
             fonts: None,
             worker: None,
@@ -336,7 +344,7 @@ impl App {
             collapsed_folders: HashSet::new(),
             file: None,
             disk: HashMap::new(),
-            status: None,
+            status: (!problems.is_empty()).then(|| config_problem(&problems.join("; "))),
             closing: false,
             opening: None,
             flushes: 0,
@@ -440,13 +448,83 @@ impl App {
         Task::none()
     }
 
-    /// Uses and remembers new Appearance choices.
+    /// Uses new Appearance choices and writes them to the config.
     fn set_settings(&mut self, settings: Settings) {
+        let changes = settings.changes_from(&self.settings);
         self.settings = settings;
-        if let Some(path) = &self.settings_path
-            && let Err(e) = self.settings.save(path)
+        if let Some(path) = &self.config_path
+            && let Err(e) = edit::apply(path, &changes)
         {
             self.status = Some(format!("Couldn't save the appearance settings: {e}"));
+        }
+    }
+
+    /// Writes a folder opened from the GUI to the config as `vault`, so the
+    /// next launch opens it.
+    fn remember_vault(&mut self, root: &Path) {
+        let Some(path) = &self.config_path else {
+            return;
+        };
+        let value = config::contract(root);
+        if self.config.vault.as_deref() == Some(value.as_str()) {
+            return;
+        }
+        match edit::apply(path, &[edit::Change::set(None, "vault", value.as_str())]) {
+            // Known now, so the watcher's reload doesn't open it a second time.
+            Ok(()) => self.config.vault = Some(value),
+            Err(e) => self.status = Some(format!("Couldn't remember the folder: {e}")),
+        }
+    }
+
+    /// Applies `config.toml` after it changed on disk (a hand edit, or the
+    /// app's own write, which changes nothing here). Appearance applies at
+    /// once; a new `vault` is opened; other changes reopen the vault with
+    /// them, keeping the open file. A file that doesn't parse is reported and
+    /// the settings in use stay.
+    fn reload_config(&mut self) {
+        let Some(path) = &self.config_path else {
+            return;
+        };
+        let config = match Config::load(path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.status = Some(config_problem(&e));
+                return;
+            }
+        };
+        if config == self.config {
+            return;
+        }
+        let (settings, mut problems) = Settings::from_config(&config.appearance);
+        self.settings = settings;
+        if let Err(e) = config.templates() {
+            problems.push(format!("{e}; using the built-in capture templates"));
+        }
+        self.status = (!problems.is_empty()).then(|| config_problem(&problems.join("; ")));
+        let template = OpenVault {
+            index_dir: self.template.index_dir.clone(),
+            data_dir: self.template.data_dir.clone(),
+            ..OpenVault::new(PathBuf::new(), &config)
+        };
+        let new_vault = config.vault != self.config.vault;
+        self.config = config;
+        let changed = template != self.template;
+        self.template = template;
+        let root = match (&self.config.vault, &self.root) {
+            (Some(v), _) if new_vault => Some(config::expand(v)),
+            (_, Some(root)) if changed => Some(root.clone()),
+            _ => None,
+        };
+        if let Some(root) = root {
+            if self.root.as_ref() == Some(&root) {
+                let file = self.file.as_ref().map(|f| (f.path.clone(), f.selected));
+                let message = self
+                    .status
+                    .clone()
+                    .unwrap_or_else(|| "Applied the changes to config.toml.".to_string());
+                self.restarted = Some((file, message));
+            }
+            self.open_folder(root);
         }
     }
 
@@ -455,6 +533,10 @@ impl App {
         Subscription::batch([
             worker::subscription(app.worker_runs).map(Message::Worker),
             iced::system::theme_changes().map(Message::Mode),
+            match &app.config_path {
+                Some(path) => watch_config(path.clone()),
+                None => Subscription::none(),
+            },
             keyboard::listen().map(Message::Key),
             window::close_requests().map(|_| Message::CloseRequested),
             iced::event::listen_with(|event, _status, _window| match event {
@@ -498,8 +580,12 @@ impl App {
                 self.vault_input = s;
                 self.vault_exists = typed_folder_exists(&self.vault_input);
             }
+            Message::ConfigChanged => self.reload_config(),
             Message::OpenTyped => match create_folder(&self.vault_input) {
-                Ok(Some(root)) => self.open_folder(root),
+                Ok(Some(root)) => {
+                    self.remember_vault(&root);
+                    self.open_folder(root);
+                }
                 Ok(None) => {}
                 Err(e) => self.status = Some(e),
             },
@@ -515,7 +601,10 @@ impl App {
                     Message::Picked,
                 );
             }
-            Message::Picked(Some(root)) => self.open_folder(root),
+            Message::Picked(Some(root)) => {
+                self.remember_vault(&root);
+                self.open_folder(root);
+            }
             Message::Picked(None) => {}
             Message::ToggleFolder(path) => {
                 if !self.collapsed_folders.remove(&path) {
@@ -1939,7 +2028,7 @@ impl App {
                 })
                 .size(12)
                 .style(dim),
-                text("Tip: set `vault` in ~/.config/blossom/config.toml to open it on start.")
+                text("Blossom opens this folder again next time.")
                     .size(12)
                     .style(dim),
                 button(text("Appearance…").size(12))
@@ -2523,7 +2612,49 @@ fn parse_when(input: &str, today: NaiveDate) -> Result<Option<Timestamp>, ()> {
     Ok(Some(ts))
 }
 
-/// Whether a link path is an SVG.
+/// A status line for a problem in `config.toml`.
+fn config_problem(message: &str) -> String {
+    format!("Settings: {message}")
+}
+
+/// `Message::ConfigChanged` whenever `config.toml` at `path` changes on disk.
+fn watch_config(path: PathBuf) -> Subscription<Message> {
+    Subscription::run_with(path, |path| {
+        let path = path.clone();
+        iced::stream::channel(
+            4,
+            async move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
+                use iced::futures::{SinkExt as _, StreamExt as _};
+                let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+                    return;
+                };
+                let name = name.to_string_lossy().into_owned();
+                let Ok(watcher) =
+                    blossom_vault::VaultWatcher::start(dir, std::time::Duration::from_millis(150))
+                else {
+                    return;
+                };
+                let (tx, mut rx) = iced::futures::channel::mpsc::unbounded();
+                std::thread::spawn(move || {
+                    while let Ok(batch) = watcher.changes().recv() {
+                        // Empty: the platform lost track, so look anyway.
+                        if (batch.is_empty() || batch.contains(&name))
+                            && tx.unbounded_send(()).is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                while rx.next().await.is_some() {
+                    if output.send(Message::ConfigChanged).await.is_err() {
+                        break;
+                    }
+                }
+            },
+        )
+    })
+}
+
 /// Whether the welcome screen's typed path is an existing folder. An empty
 /// field counts as existing, so no "will be created" hint shows.
 fn typed_folder_exists(input: &str) -> bool {
@@ -2544,6 +2675,7 @@ fn create_folder(input: &str) -> Result<Option<PathBuf>, String> {
         .map_err(|e| format!("Couldn't create {}: {e}", root.display()))
 }
 
+/// Whether a link path is an SVG.
 fn is_svg(path: &str) -> bool {
     std::path::Path::new(path)
         .extension()
@@ -2772,9 +2904,89 @@ mod tests {
             template,
             NaiveDate::from_ymd_opt(2026, 11, 23).unwrap(),
             None,
-            (Settings::default(), None),
+            (Config::default(), None),
         )
         .0
+    }
+
+    /// The appearance in the config at `path`.
+    fn saved(path: &Path) -> Settings {
+        Settings::from_config(&Config::load(path).unwrap().appearance).0
+    }
+
+    #[test]
+    fn hand_edits_to_the_config_apply_while_running() {
+        use crate::style::ModeChoice;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        edit::create(&path).unwrap();
+        let mut a = app();
+        a.config_path = Some(path.clone());
+        a.root = Some(PathBuf::from("/v"));
+        let _ = a.update(Message::Appearance(Appearance::Mode(ModeChoice::Dark)));
+        // The app's own write changes nothing more when it's read back.
+        let _ = a.update(Message::ConfigChanged);
+        assert_eq!(a.settings.mode, ModeChoice::Dark);
+        assert!(a.pending.is_none() && a.status.is_none());
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            text.replace("\nmode = \"dark\"", "\nmode = \"light\"")
+                .replace("# colours = \"blossom\"", "colours = \"gray\"")
+                .replace("# inbox = \"inbox.org\"", "inbox = \"in.org\""),
+        )
+        .unwrap();
+        let _ = a.update(Message::ConfigChanged);
+        assert_eq!(
+            (a.settings.mode, a.settings.colours),
+            (ModeChoice::Light, Colours::Gray)
+        );
+        // The inbox changed: the vault is reopened with it.
+        assert_eq!(a.template.templates[0].file, "in.org");
+        assert_eq!(
+            a.pending.as_ref().map(|o| o.root.clone()),
+            Some(PathBuf::from("/v"))
+        );
+        // A file that doesn't parse leaves everything as it was.
+        std::fs::write(&path, "colours = \n").unwrap();
+        let _ = a.update(Message::ConfigChanged);
+        assert_eq!(a.settings.colours, Colours::Gray);
+        assert!(a.status.as_deref().unwrap().starts_with("Settings: "));
+        // A bad value gives the default and says so.
+        std::fs::write(&path, "[appearance]\ncolours = \"teal\"\n").unwrap();
+        let _ = a.update(Message::ConfigChanged);
+        assert_eq!(a.settings.colours, Colours::Blossom);
+        assert!(a.status.as_deref().unwrap().contains("teal"));
+    }
+
+    #[test]
+    fn a_folder_opened_in_the_app_is_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        edit::create(&path).unwrap();
+        let mut a = app();
+        a.config_path = Some(path.clone());
+        let notes = dir.path().join("notes");
+        let _ = a.update(Message::Picked(Some(notes.clone())));
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.vault.as_deref(), Some(notes.to_str().unwrap()));
+        assert_eq!(
+            a.pending.as_ref().map(|o| o.root.clone()),
+            Some(notes.clone())
+        );
+        // Reading the app's own write back doesn't open it again.
+        a.pending = None;
+        let _ = a.update(Message::ConfigChanged);
+        assert!(a.pending.is_none());
+        // A hand edit to `vault` opens the new folder.
+        let other = dir.path().join("other");
+        edit::apply(
+            &path,
+            &[edit::Change::set(None, "vault", other.to_str().unwrap())],
+        )
+        .unwrap();
+        let _ = a.update(Message::ConfigChanged);
+        assert_eq!(a.pending.as_ref().map(|o| o.root.clone()), Some(other));
     }
 
     #[test]
@@ -2796,9 +3008,9 @@ mod tests {
     #[test]
     fn font_choices_reach_the_read_view_and_are_saved() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.toml");
+        let path = dir.path().join("config.toml");
         let mut a = app();
-        a.settings_path = Some(path.clone());
+        a.config_path = Some(path.clone());
         assert_eq!(a.ink().body, Font::DEFAULT);
         assert_eq!(a.ink().code, Font::MONOSPACE);
         let _ = a.update(Message::Appearance(Appearance::ReadFont(fonts::Choice(
@@ -2812,7 +3024,7 @@ mod tests {
         assert_eq!(ink.body.family, iced::font::Family::Name("Inter"));
         assert_eq!(ink.code.family, iced::font::Family::Name("Fira Code"));
         assert_eq!(ink.size, 18);
-        assert_eq!(Settings::load(&path).0, a.settings);
+        assert_eq!(saved(&path), a.settings);
         let _ = a.update(Message::Appearance(Appearance::ReadFont(fonts::Choice(
             None,
         ))));
@@ -2823,14 +3035,14 @@ mod tests {
     fn appearance_choices_are_saved_and_escape_closes_the_panel() {
         use crate::style::ModeChoice;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.toml");
+        let path = dir.path().join("config.toml");
         let mut a = app();
-        a.settings_path = Some(path.clone());
+        a.config_path = Some(path.clone());
         let _ = a.update(Message::Appearance(Appearance::Open));
         assert!(a.appearance);
         let _ = a.update(Message::Appearance(Appearance::Colours(Colours::Solarized)));
         let _ = a.update(Message::Appearance(Appearance::Mode(ModeChoice::Dark)));
-        assert_eq!(Settings::load(&path).0, a.settings);
+        assert_eq!(saved(&path), a.settings);
         let _ = a.update(Message::Key(keyboard::Event::KeyPressed {
             key: Key::Named(keyboard::key::Named::Escape),
             modified_key: Key::Named(keyboard::key::Named::Escape),

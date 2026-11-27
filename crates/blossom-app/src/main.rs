@@ -1,7 +1,9 @@
 //! Blossom: a desktop org-mode notes app.
 //!
 //! `blossom [VAULT]` opens `VAULT`, or the `vault` from
-//! `~/.config/blossom/config.toml`, or a welcome screen to choose one.
+//! `~/.config/blossom/config.toml`, or a welcome screen to choose one. The
+//! config file is made on first launch, and the app writes the choices made
+//! in it back there (see `blossom_vault::config::edit`).
 
 mod agenda;
 mod app;
@@ -53,6 +55,33 @@ fn window_settings() -> iced::window::Settings {
     }
 }
 
+/// The config at `path`: made with every option commented out on first
+/// launch, with the old `settings.toml` moved into it. Problems go to stderr
+/// and give the defaults.
+fn load_config(path: Option<&std::path::Path>) -> Config {
+    let Some(path) = path else {
+        return Config::default();
+    };
+    if let Err(e) = config::edit::create(path) {
+        eprintln!("blossom: {e}");
+    }
+    let load = || {
+        Config::load(path).unwrap_or_else(|e| {
+            eprintln!("blossom: {e}");
+            Config::default()
+        })
+    };
+    let config = load();
+    match settings::old_path().map(|old| settings::migrate(&old, path, &config.appearance)) {
+        Some(Some(message)) => {
+            eprintln!("blossom: {message}");
+            load()
+        }
+        Some(None) => load(),
+        None => config,
+    }
+}
+
 fn main() -> iced::Result {
     let arg = std::env::args_os().nth(1).map(PathBuf::from);
     if arg.as_deref().is_some_and(|a| a == "--help" || a == "-h") {
@@ -61,14 +90,8 @@ fn main() -> iced::Result {
         );
         return Ok(());
     }
-    let config = match config::default_path().map(|p| Config::load(&p)) {
-        Some(Ok(c)) => c,
-        Some(Err(e)) => {
-            eprintln!("blossom: {e}");
-            Config::default()
-        }
-        None => Config::default(),
-    };
+    let config_path = config::default_path();
+    let config = load_config(config_path.as_deref());
     let template = OpenVault::new(PathBuf::new(), &config);
     let root = arg.or_else(|| config.vault.as_deref().map(config::expand));
     let open = root.map(|root| OpenVault {
@@ -77,16 +100,6 @@ fn main() -> iced::Result {
     });
     let today = chrono::Local::now().date_naive();
     let shot = shot::Plan::from_env();
-    let settings_path = settings::default_path();
-    let saved = match settings_path.as_deref().map(settings::Settings::load) {
-        Some((s, err)) => {
-            if let Some(e) = err {
-                eprintln!("blossom: {e}");
-            }
-            s
-        }
-        None => settings::Settings::default(),
-    };
     iced::application(
         move || {
             App::new(
@@ -94,7 +107,7 @@ fn main() -> iced::Result {
                 template.clone(),
                 today,
                 shot.clone(),
-                (saved.clone(), settings_path.clone()),
+                (config.clone(), config_path.clone()),
             )
         },
         App::update,

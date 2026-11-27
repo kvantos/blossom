@@ -44,6 +44,7 @@ serde_json = "1"
 tantivy = "0.27"
 tempfile = "3"
 toml = "1"
+toml_edit = "0.25"
 
 # Strict lints for our own crates. The vendored orgize fork does not opt in.
 [workspace.lints.rust]
