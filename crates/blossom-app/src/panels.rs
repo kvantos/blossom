@@ -16,15 +16,14 @@ use blossom_vault::ops::HeadingRef;
 use chrono::NaiveDateTime;
 use iced::widget::text_editor::{Content, Cursor, Position};
 use iced::widget::{
-    Column, button, column, container, pick_list, radio, row, scrollable, text, text_editor,
-    text_input,
+    Column, button, column, container, pick_list, row, scrollable, text, text_editor, text_input,
 };
 use iced::{Element, Fill, Font};
 
 use crate::app::{Message, bold, dim};
-use crate::fonts::{self, Choice, Installed};
-use crate::settings::{self, Settings};
-use crate::style::{self, Colours, ModeChoice};
+use crate::fonts;
+use crate::settings::Settings;
+use crate::style;
 use crate::worker::RefileTarget;
 
 /// The capture panel's widget id, for focusing.
@@ -256,123 +255,6 @@ impl RefilePicker {
             .take(SHOWN)
             .collect()
     }
-}
-
-/// What the Appearance panel does.
-#[derive(Clone, Debug)]
-pub enum Appearance {
-    /// Open the panel.
-    Open,
-    /// Close it.
-    Close,
-    /// Which colours.
-    Colours(Colours),
-    /// Light, dark or follow the system.
-    Mode(ModeChoice),
-    /// The note text's font.
-    ReadFont(Choice),
-    /// The note text's size.
-    ReadSize(u32),
-    /// The editor's font.
-    EditorFont(Choice),
-    /// The editor's size.
-    EditorSize(u32),
-    /// The installed fonts were read.
-    FontsListed(Arc<Installed>),
-}
-
-/// The Appearance panel: colours, light/dark and fonts. A choice applies at
-/// once. `installed` is `None` while the font list is being read.
-pub fn appearance_view<'a>(s: &'a Settings, installed: Option<&Installed>) -> Element<'a, Message> {
-    let read = Choice(s.read_font.clone());
-    let edit = Choice(s.editor_font.clone());
-    let (read_list, edit_list) = installed.map_or_else(
-        || (vec![read.clone()], vec![edit.clone()]),
-        |i| (i.for_reading(), i.for_editing()),
-    );
-    let sizes: Vec<u32> = settings::SIZES.collect();
-    let font_row = |label,
-                    list,
-                    current,
-                    on_font: fn(Choice) -> Appearance,
-                    size,
-                    on_size: fn(u32) -> Appearance| {
-        row![
-            text(label).size(13).width(80),
-            pick_list(list, Some(current), move |c| Message::Appearance(on_font(
-                c
-            )))
-            .text_size(13)
-            .padding([3, 8])
-            .width(Fill),
-            pick_list(sizes.clone(), Some(size), move |n| {
-                Message::Appearance(on_size(n))
-            })
-            .text_size(13)
-            .padding([3, 8])
-            .width(64),
-        ]
-        .spacing(8)
-        .align_y(iced::Center)
-    };
-    let colours = Colours::ALL.map(|c| {
-        radio(c.label(), c, Some(s.colours), |c| {
-            Message::Appearance(Appearance::Colours(c))
-        })
-        .size(16)
-        .text_size(14)
-        .into()
-    });
-    let modes = ModeChoice::ALL.map(|m| {
-        radio(m.label(), m, Some(s.mode), |m| {
-            Message::Appearance(Appearance::Mode(m))
-        })
-        .size(16)
-        .text_size(14)
-        .into()
-    });
-    panel_sized(
-        column![
-            text("Appearance").size(18).font(bold()),
-            text("Colours").size(13).style(dim),
-            Column::from_iter(colours).spacing(8),
-            text("Mode").size(13).style(dim),
-            Column::from_iter(modes).spacing(8),
-            text(if installed.is_some() {
-                "Fonts"
-            } else {
-                "Fonts (reading the installed fonts…)"
-            })
-            .size(13)
-            .style(dim),
-            font_row(
-                "Notes",
-                read_list,
-                read,
-                Appearance::ReadFont,
-                s.read_size,
-                Appearance::ReadSize
-            ),
-            font_row(
-                "Editor",
-                edit_list,
-                edit,
-                Appearance::EditorFont,
-                s.editor_size,
-                Appearance::EditorSize
-            ),
-            row![
-                text("Esc closes").size(12).style(dim).width(Fill),
-                button(text("Close").size(13))
-                    .on_press(Message::Appearance(Appearance::Close))
-                    .padding([3, 10]),
-            ]
-            .align_y(iced::Center),
-        ]
-        .spacing(10)
-        .into(),
-        440.0,
-    )
 }
 
 /// The refile picker.

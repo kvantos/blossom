@@ -48,11 +48,11 @@ use crate::file::{DiskCopy, DiskState, Group, OpenFile, SectionEditor, Selected}
 use crate::fonts;
 use crate::meaning;
 use crate::outline;
-use crate::panels::Appearance;
 use crate::panels::{self, CapturePanel, RefilePicker};
 use crate::read::{self, Actions, Ink, Picture};
 use crate::search;
 use crate::settings::Settings;
+use crate::settings_panel::{self, Setting};
 use crate::shot;
 use crate::style::Colours;
 use crate::style::{self, Chip};
@@ -85,9 +85,9 @@ pub struct App {
     /// `config.toml`, which the app watches and writes choices to; `None`
     /// in tests.
     config_path: Option<PathBuf>,
-    /// The Appearance panel is open.
-    appearance: bool,
-    /// The installed fonts, once read for the Appearance panel.
+    /// The Settings panel, when open.
+    settings_panel: Option<settings_panel::Panel>,
+    /// The installed fonts, once read for the Settings panel.
     fonts: Option<Arc<fonts::Installed>>,
     worker: Option<Handle>,
     /// A vault to open as soon as the worker is ready.
@@ -258,8 +258,8 @@ pub enum Message {
     DismissNotice,
     /// Open the capture panel.
     OpenCapture,
-    /// The Appearance panel.
-    Appearance(Appearance),
+    /// The Settings panel.
+    Setting(Setting),
     /// Capture: choose a template, by its label.
     CaptureTemplate(String),
     /// Capture: answer prompt N.
@@ -330,7 +330,7 @@ impl App {
             settings,
             config,
             config_path,
-            appearance: false,
+            settings_panel: None,
             fonts: None,
             worker: None,
             vault_exists: open.is_some() || typed_folder_exists(DEFAULT_FOLDER),
@@ -416,36 +416,128 @@ impl App {
             .unwrap_or(self.settings.colours)
     }
 
-    /// The Appearance panel's messages.
-    fn on_appearance(&mut self, message: Appearance) -> Task<Message> {
+    /// The Settings panel's messages.
+    fn on_setting(&mut self, message: Setting) -> Task<Message> {
         let mut new = self.settings.clone();
         match message {
-            Appearance::Open => {
-                self.appearance = true;
+            Setting::Open => {
+                let semantic = &self.config.semantic;
+                self.settings_panel = Some(settings_panel::Panel {
+                    section: settings_panel::Section::default(),
+                    server: semantic.server.clone().unwrap_or_default(),
+                    server_model: semantic.server_model.clone().unwrap_or_default(),
+                });
                 if self.fonts.is_none() {
                     return Task::perform(async { fonts::installed() }, |i| {
-                        Message::Appearance(Appearance::FontsListed(Arc::new(i)))
+                        Message::Setting(Setting::FontsListed(Arc::new(i)))
                     });
                 }
                 return Task::none();
             }
-            Appearance::Close => {
-                self.appearance = false;
+            Setting::Close => {
+                self.settings_panel = None;
                 return Task::none();
             }
-            Appearance::FontsListed(installed) => {
+            Setting::Section(section) => {
+                if let Some(p) = &mut self.settings_panel {
+                    p.section = section;
+                }
+                return Task::none();
+            }
+            Setting::FontsListed(installed) => {
                 self.fonts = Some(installed);
                 return Task::none();
             }
-            Appearance::Colours(c) => new.colours = c,
-            Appearance::Mode(m) => new.mode = m,
-            Appearance::ReadFont(f) => new.read_font = f.0,
-            Appearance::ReadSize(n) => new.read_size = n,
-            Appearance::EditorFont(f) => new.editor_font = f.0,
-            Appearance::EditorSize(n) => new.editor_size = n,
+            Setting::Model(m) => {
+                self.write_config(&[edit::Change::set(Some("semantic"), "model", m.name())]);
+                return Task::none();
+            }
+            Setting::Server(text) => {
+                if let Some(p) = &mut self.settings_panel {
+                    p.server = text;
+                }
+                return Task::none();
+            }
+            Setting::ServerModel(text) => {
+                if let Some(p) = &mut self.settings_panel {
+                    p.server_model = text;
+                }
+                return Task::none();
+            }
+            Setting::ApplyServer => {
+                if let Some(p) = &self.settings_panel {
+                    let field = |key, value: &str| match value.trim() {
+                        "" => edit::Change::unset(Some("semantic"), key),
+                        v => edit::Change::set(Some("semantic"), key, v),
+                    };
+                    let changes = [
+                        field("server", &p.server),
+                        field("server_model", &p.server_model),
+                    ];
+                    self.write_config(&changes);
+                }
+                return Task::none();
+            }
+            Setting::Download => {
+                self.send(Request::DownloadModel);
+                return Task::none();
+            }
+            Setting::Colours(c) => new.colours = c,
+            Setting::Mode(m) => new.mode = m,
+            Setting::ReadFont(f) => new.read_font = f.0,
+            Setting::ReadSize(n) => new.read_size = n,
+            Setting::EditorFont(f) => new.editor_font = f.0,
+            Setting::EditorSize(n) => new.editor_size = n,
         }
         self.set_settings(new);
         Task::none()
+    }
+
+    /// Writes `changes` to the config and applies it at once (the watcher
+    /// then finds nothing new).
+    fn write_config(&mut self, changes: &[edit::Change]) {
+        let Some(path) = &self.config_path else {
+            return;
+        };
+        match edit::apply(path, changes) {
+            Ok(()) => self.reload_config(),
+            Err(e) => self.status = Some(format!("Couldn't save the setting: {e}")),
+        }
+    }
+
+    /// The Settings panel, when open.
+    fn settings_view(&self) -> Option<Element<'_, Message>> {
+        use settings_panel::{ModelChoice, SearchState, View};
+        let panel = self.settings_panel.as_ref()?;
+        let semantic = &self.config.semantic;
+        let model = ModelChoice::from_config(semantic.model.as_deref())
+            .filter(|m| ModelChoice::offered().contains(m));
+        let data_dir = self.template.data_dir.clone().or_else(config::data_dir);
+        let downloaded = model
+            .and_then(ModelChoice::builtin)
+            .zip(data_dir)
+            .is_some_and(|(m, dir)| m.is_downloaded(&dir));
+        Some(settings_panel::view(View {
+            panel,
+            settings: &self.settings,
+            installed: self.fonts.as_deref(),
+            folder: self
+                .root
+                .as_deref()
+                .map(config::contract)
+                .or_else(|| self.config.vault.clone()),
+            config_path: self.config_path.as_deref().map(config::contract),
+            search: SearchState {
+                model,
+                saved_server: (
+                    semantic.server.as_deref().unwrap_or(""),
+                    semantic.server_model.as_deref().unwrap_or(""),
+                ),
+                downloaded,
+                status: self.meaning.as_ref(),
+                vault_open: self.root.is_some(),
+            },
+        }))
     }
 
     /// Uses new Appearance choices and writes them to the config.
@@ -575,7 +667,7 @@ impl App {
         match message {
             Message::Worker(event) => return self.on_worker(event),
             Message::Mode(mode) => self.system = mode,
-            Message::Appearance(m) => return self.on_appearance(m),
+            Message::Setting(m) => return self.on_setting(m),
             Message::VaultInput(s) => {
                 self.vault_input = s;
                 self.vault_exists = typed_folder_exists(&self.vault_input);
@@ -1769,7 +1861,7 @@ impl App {
             return Task::none();
         }
         if matches!(key, Key::Named(keyboard::key::Named::Escape)) {
-            if std::mem::take(&mut self.appearance) {
+            if self.settings_panel.take().is_some() {
                 return Task::none();
             }
             if self.refile.take().is_some() {
@@ -1792,6 +1884,7 @@ impl App {
                 return self.update(Message::PickFolder);
             }
             Key::Character(c) if c.eq_ignore_ascii_case("n") => return self.open_capture(),
+            Key::Character(",") => return self.on_setting(Setting::Open),
             Key::Character(c) if c.eq_ignore_ascii_case("v") && !modifiers.shift() => {
                 return paste();
             }
@@ -1840,7 +1933,12 @@ impl App {
             self.image_action(path.clone());
             return Task::none();
         }
-        self.appearance = plan.appearance;
+        if plan.appearance {
+            let _ = self.on_setting(Setting::Open);
+            if let Some(section) = plan.section {
+                let _ = self.on_setting(Setting::Section(section));
+            }
+        }
         let focus = if plan.capture {
             self.open_capture()
         } else if plan.edit {
@@ -1889,11 +1987,8 @@ impl App {
     /// main area rather than floating over it: iced's layered `stack` drops
     /// a text editor's text.
     fn panel(&self) -> Option<Element<'_, Message>> {
-        if self.appearance {
-            return Some(panels::appearance_view(
-                &self.settings,
-                self.fonts.as_deref(),
-            ));
+        if let Some(view) = self.settings_view() {
+            return Some(view);
         }
         if let Some(r) = &self.refile {
             return Some(panels::refile_view(r));
@@ -1913,13 +2008,10 @@ impl App {
     }
 
     fn body(&self) -> Element<'_, Message> {
-        let main: Element<'_, Message> = if self.root.is_none() && self.appearance {
-            container(panels::appearance_view(
-                &self.settings,
-                self.fonts.as_deref(),
-            ))
-            .center(Fill)
-            .into()
+        let main: Element<'_, Message> = if self.root.is_none()
+            && let Some(view) = self.settings_view()
+        {
+            container(view).center(Fill).into()
         } else if self.root.is_none() {
             self.welcome()
         } else if let Some(d) = &self.diagram {
@@ -2031,8 +2123,8 @@ impl App {
                 text("Blossom opens this folder again next time.")
                     .size(12)
                     .style(dim),
-                button(text("Appearance…").size(12))
-                    .on_press(Message::Appearance(Appearance::Open))
+                button(text("Settings…").size(12))
+                    .on_press(Message::Setting(Setting::Open))
                     .padding([2, 0])
                     .style(button::text),
             ]
@@ -2146,8 +2238,8 @@ impl App {
             rule::horizontal(1),
             scrollable(Column::with_children(rows).spacing(1).padding([6, 6])).height(Fill),
             rule::horizontal(1),
-            button(text("Appearance…").size(12))
-                .on_press(Message::Appearance(Appearance::Open))
+            button(text("Settings…").size(12))
+                .on_press(Message::Setting(Setting::Open))
                 .padding([6, 12])
                 .style(button::text),
         ]
@@ -2190,7 +2282,7 @@ impl App {
                 .into(),
             );
         }
-        // The outline keeps the app's font; the Appearance fonts are the note's.
+        // The outline keeps the app's font; the chosen fonts are the note's.
         let ink = self.ink().ui();
         for r in outline::rows(doc, &f.folded) {
             let Some(h) = doc.heading(r.index) else {
@@ -2923,7 +3015,7 @@ mod tests {
         let mut a = app();
         a.config_path = Some(path.clone());
         a.root = Some(PathBuf::from("/v"));
-        let _ = a.update(Message::Appearance(Appearance::Mode(ModeChoice::Dark)));
+        let _ = a.update(Message::Setting(Setting::Mode(ModeChoice::Dark)));
         // The app's own write changes nothing more when it's read back.
         let _ = a.update(Message::ConfigChanged);
         assert_eq!(a.settings.mode, ModeChoice::Dark);
@@ -2957,6 +3049,53 @@ mod tests {
         let _ = a.update(Message::ConfigChanged);
         assert_eq!(a.settings.colours, Colours::Blossom);
         assert!(a.status.as_deref().unwrap().contains("teal"));
+    }
+
+    #[test]
+    fn the_settings_panel_writes_search_choices() {
+        use crate::settings_panel::{ModelChoice, Section};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        edit::create(&path).unwrap();
+        let mut a = app();
+        a.config_path = Some(path.clone());
+        a.root = Some(PathBuf::from("/v"));
+        let _ = a.update(Message::Setting(Setting::Open));
+        let _ = a.update(Message::Setting(Setting::Section(Section::Search)));
+        assert_eq!(a.settings_panel.as_ref().unwrap().section, Section::Search);
+        let _ = a.update(Message::Setting(Setting::Model(ModelChoice::Server)));
+        // Written, applied, and the vault reopened with it.
+        assert_eq!(
+            Config::load(&path).unwrap().semantic.model.as_deref(),
+            Some("server")
+        );
+        assert_eq!(a.template.semantic.model.as_deref(), Some("server"));
+        assert!(a.pending.is_some());
+        // Typing writes nothing until applied; an empty field is unset.
+        let _ = a.update(Message::Setting(Setting::Server(
+            "http://box:11434/v1".into(),
+        )));
+        let _ = a.update(Message::Setting(Setting::ServerModel("  ".into())));
+        assert_eq!(Config::load(&path).unwrap().semantic.server, None);
+        let _ = a.update(Message::Setting(Setting::ApplyServer));
+        let c = Config::load(&path).unwrap().semantic;
+        assert_eq!(
+            (c.server.as_deref(), c.server_model),
+            (Some("http://box:11434/v1"), None)
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\n# server_model = \"nomic-embed-text\"\n"),
+            "{text}"
+        );
+        // Reopening the panel fills the fields from the config.
+        let _ = a.update(Message::Setting(Setting::Close));
+        let _ = a.update(Message::Setting(Setting::Open));
+        assert_eq!(
+            a.settings_panel.as_ref().unwrap().server,
+            "http://box:11434/v1"
+        );
+        assert!(a.settings_view().is_some());
     }
 
     #[test]
@@ -2996,12 +3135,12 @@ mod tests {
         assert!(a.theme().is_none(), "system mode not known yet");
         let _ = a.update(Message::Mode(Mode::Dark));
         assert_eq!(a.mode(), Mode::Dark);
-        let _ = a.update(Message::Appearance(Appearance::Mode(ModeChoice::Light)));
+        let _ = a.update(Message::Setting(Setting::Mode(ModeChoice::Light)));
         let _ = a.update(Message::Mode(Mode::Dark));
         assert_eq!(a.mode(), Mode::Light);
-        let _ = a.update(Message::Appearance(Appearance::Colours(Colours::Gray)));
+        let _ = a.update(Message::Setting(Setting::Colours(Colours::Gray)));
         assert_eq!(a.theme().map(|t| t.to_string()), Some("Gray Light".into()));
-        let _ = a.update(Message::Appearance(Appearance::Mode(ModeChoice::System)));
+        let _ = a.update(Message::Setting(Setting::Mode(ModeChoice::System)));
         assert_eq!(a.mode(), Mode::Dark);
     }
 
@@ -3013,21 +3152,19 @@ mod tests {
         a.config_path = Some(path.clone());
         assert_eq!(a.ink().body, Font::DEFAULT);
         assert_eq!(a.ink().code, Font::MONOSPACE);
-        let _ = a.update(Message::Appearance(Appearance::ReadFont(fonts::Choice(
-            Some("Inter".into()),
-        ))));
-        let _ = a.update(Message::Appearance(Appearance::ReadSize(18)));
-        let _ = a.update(Message::Appearance(Appearance::EditorFont(fonts::Choice(
-            Some("Fira Code".into()),
-        ))));
+        let _ = a.update(Message::Setting(Setting::ReadFont(fonts::Choice(Some(
+            "Inter".into(),
+        )))));
+        let _ = a.update(Message::Setting(Setting::ReadSize(18)));
+        let _ = a.update(Message::Setting(Setting::EditorFont(fonts::Choice(Some(
+            "Fira Code".into(),
+        )))));
         let ink = a.ink();
         assert_eq!(ink.body.family, iced::font::Family::Name("Inter"));
         assert_eq!(ink.code.family, iced::font::Family::Name("Fira Code"));
         assert_eq!(ink.size, 18);
         assert_eq!(saved(&path), a.settings);
-        let _ = a.update(Message::Appearance(Appearance::ReadFont(fonts::Choice(
-            None,
-        ))));
+        let _ = a.update(Message::Setting(Setting::ReadFont(fonts::Choice(None))));
         assert_eq!(a.ink().body, Font::DEFAULT);
     }
 
@@ -3038,10 +3175,10 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut a = app();
         a.config_path = Some(path.clone());
-        let _ = a.update(Message::Appearance(Appearance::Open));
-        assert!(a.appearance);
-        let _ = a.update(Message::Appearance(Appearance::Colours(Colours::Solarized)));
-        let _ = a.update(Message::Appearance(Appearance::Mode(ModeChoice::Dark)));
+        let _ = a.update(Message::Setting(Setting::Open));
+        assert!(a.settings_panel.is_some());
+        let _ = a.update(Message::Setting(Setting::Colours(Colours::Solarized)));
+        let _ = a.update(Message::Setting(Setting::Mode(ModeChoice::Dark)));
         assert_eq!(saved(&path), a.settings);
         let _ = a.update(Message::Key(keyboard::Event::KeyPressed {
             key: Key::Named(keyboard::key::Named::Escape),
@@ -3054,7 +3191,7 @@ mod tests {
             text: None,
             repeat: false,
         }));
-        assert!(!a.appearance);
+        assert!(a.settings_panel.is_none());
     }
 
     fn doc(s: &str) -> Arc<Document> {

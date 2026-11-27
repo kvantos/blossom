@@ -19,6 +19,7 @@ mod panels;
 mod read;
 mod search;
 mod settings;
+mod settings_panel;
 mod shot;
 mod style;
 mod tree;

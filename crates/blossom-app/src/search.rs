@@ -158,7 +158,7 @@ fn meaning_view<'a>(
 }
 
 /// What search by meaning needs or is doing; `None` once it is ready.
-fn status_view(status: &Status) -> Option<Element<'_, Message>> {
+pub fn status_view(status: &Status) -> Option<Element<'_, Message>> {
     let note = |s: String| text(s).size(13).style(dim);
     let panel: Element<'_, Message> = match status {
         Status::Ready => return None,

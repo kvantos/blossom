@@ -669,6 +669,8 @@ fn handle_op(o: &mut Open, request: Request, loaded: Option<&str>, emit: &mut dy
             emit_search(o, emit);
         }
         Request::DownloadModel => {
+            // From Settings, before any search by meaning: start it now.
+            start_meaning(o);
             if let Some(m) = &o.meaning {
                 m.send(meaning::In::Download);
             }
@@ -1005,15 +1007,8 @@ fn match_context(o: &Open) -> MatchContext {
     }
 }
 
-/// Hands a search by meaning to the meaning thread (starting it the first
-/// time): the query's words, and the headings its filters allow. Without
-/// words there is nothing to rank; empty results say so at once.
-fn ask_meaning(o: &mut Open, query: &str, emit: &mut dyn FnMut(Event)) {
-    let (words, filter) = Query::parse(query).split_text();
-    let candidates = match o.index.search(&filter, &match_context(o)) {
-        Ok(c) => c,
-        Err(e) => return emit(Event::Error(e.to_string())),
-    };
+/// Starts the meaning thread, with every heading, unless it runs already.
+fn start_meaning(o: &mut Open) {
     if o.meaning.is_none() {
         let (myself, generation) = (o.myself.clone(), o.generation);
         let m = Meaning::start(
@@ -1027,6 +1022,18 @@ fn ask_meaning(o: &mut Open, query: &str, emit: &mut dyn FnMut(Event)) {
         )));
         o.meaning = Some(m);
     }
+}
+
+/// Hands a search by meaning to the meaning thread (starting it the first
+/// time): the query's words, and the headings its filters allow. Without
+/// words there is nothing to rank; empty results say so at once.
+fn ask_meaning(o: &mut Open, query: &str, emit: &mut dyn FnMut(Event)) {
+    let (words, filter) = Query::parse(query).split_text();
+    let candidates = match o.index.search(&filter, &match_context(o)) {
+        Ok(c) => c,
+        Err(e) => return emit(Event::Error(e.to_string())),
+    };
+    start_meaning(o);
     let Some(m) = &o.meaning else { return };
     if words.is_empty() {
         m.send(meaning::In::Ask(None));

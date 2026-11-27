@@ -1,4 +1,4 @@
-//! Installed fonts for the Appearance panel, and fonts by name.
+//! Installed fonts for the Settings panel, and fonts by name.
 
 use std::collections::BTreeSet;
 use std::collections::HashSet;
