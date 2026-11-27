@@ -22,6 +22,7 @@ mod search;
 mod settings;
 mod settings_panel;
 mod shot;
+mod state;
 mod style;
 mod topbar;
 mod tree;
@@ -105,13 +106,14 @@ fn main() -> iced::Result {
     let shot = shot::Plan::from_env();
     iced::application(
         move || {
-            App::new(
+            let (app, task) = App::new(
                 open.clone(),
                 template.clone(),
                 today,
                 shot.clone(),
                 (config.clone(), config_path.clone()),
-            )
+            );
+            (app.with_state(state::default_path()), task)
         },
         App::update,
         App::view,

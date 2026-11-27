@@ -55,6 +55,7 @@ use crate::search;
 use crate::settings::Settings;
 use crate::settings_panel::{self, Setting};
 use crate::shot;
+use crate::state::{self, State};
 use crate::style::Colours;
 use crate::style::{self, Chip};
 use crate::topbar;
@@ -93,6 +94,12 @@ pub struct App {
     sidebar: bool,
     /// The sidebar's "New file" form, when open.
     new_file: Option<NewFile>,
+    /// The file last open in each folder.
+    state: State,
+    /// Where `state` is saved; `None` in tests.
+    state_path: Option<PathBuf>,
+    /// A folder just opened: open its start file once the list arrives.
+    choose_start: bool,
     /// The installed fonts, once read for the Settings panel.
     fonts: Option<Arc<fonts::Installed>>,
     worker: Option<Handle>,
@@ -345,6 +352,9 @@ impl App {
             settings_panel: None,
             sidebar: true,
             new_file: None,
+            state: State::default(),
+            state_path: None,
+            choose_start: false,
             fonts: None,
             worker: None,
             vault_exists: open.is_some() || typed_folder_exists(DEFAULT_FOLDER),
@@ -391,6 +401,14 @@ impl App {
             return (app, Task::none());
         }
         (app, iced::system::theme().map(Message::Mode))
+    }
+
+    /// The app with the state saved at `path` (the last open files).
+    #[must_use]
+    pub fn with_state(mut self, path: Option<PathBuf>) -> App {
+        self.state = path.as_deref().map_or_else(State::default, State::load);
+        self.state_path = path;
+        self
     }
 
     /// The window title.
@@ -1139,6 +1157,14 @@ impl App {
         if self.file.as_ref().is_some_and(|f| f.path == path) {
             return;
         }
+        self.choose_start = false;
+        if let Some(root) = &self.root
+            && self.state.set_last_file(root, &path)
+            && let Some(state_path) = &self.state_path
+            && let Err(e) = self.state.save(state_path)
+        {
+            eprintln!("blossom: {e}");
+        }
         if let Some(w) = &self.worker {
             w.send(Request::Load(path.clone()));
         }
@@ -1173,6 +1199,8 @@ impl App {
                 self.select_file(path);
             }
         }
+        // Not after a restart, which brought its own file back.
+        self.choose_start = self.file.is_none();
     }
 
     fn on_worker(&mut self, event: Event) -> Task<Message> {
@@ -1186,6 +1214,18 @@ impl App {
             Event::Opened(root) => self.on_opened(root),
             Event::Files(files) => {
                 self.files = files;
+                if std::mem::take(&mut self.choose_start)
+                    && self.shot.is_none()
+                    && self.file.is_none()
+                    && let Some(root) = &self.root
+                    && let Some(path) = state::start_file(
+                        self.state.last_file(root),
+                        &self.config.inbox(),
+                        &self.files,
+                    )
+                {
+                    self.select_file(path);
+                }
                 if let Some(plan) = &self.shot
                     && self.file.is_none()
                     && let Some(path) = plan
@@ -3228,6 +3268,49 @@ mod tests {
         let _ = a.update(Message::NewFile(NewFileMsg::Open));
         let _ = a.update(Message::NewFile(NewFileMsg::Cancel));
         assert!(a.new_file.is_none());
+    }
+
+    #[test]
+    fn a_folder_opens_on_its_last_file_else_the_inbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.toml");
+        let infos = |paths: &[&str]| {
+            Arc::new(
+                paths
+                    .iter()
+                    .map(|p| FileInfo {
+                        path: (*p).into(),
+                        headings: 0,
+                        open_tasks: 0,
+                        conflict: false,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let open = |a: &mut App, files: &[&str]| {
+            let _ = a.update(Message::Worker(Event::Opened(PathBuf::from("/v"))));
+            let _ = a.update(Message::Worker(Event::Files(infos(files))));
+        };
+        // First time: the inbox.
+        let mut a = app().with_state(Some(state_path.clone()));
+        open(&mut a, &["inbox.org", "work.org"]);
+        assert_eq!(a.file.as_ref().map(|f| f.path.as_str()), Some("inbox.org"));
+        // Choosing another file is remembered for next time.
+        let _ = a.update(Message::SelectFile("work.org".into()));
+        let mut a = app().with_state(Some(state_path.clone()));
+        open(&mut a, &["inbox.org", "work.org"]);
+        assert_eq!(a.file.as_ref().map(|f| f.path.as_str()), Some("work.org"));
+        // A later file list (after a save) doesn't switch files.
+        let _ = a.update(Message::SelectFile("inbox.org".into()));
+        let _ = a.update(Message::Worker(Event::Files(infos(&[
+            "inbox.org",
+            "work.org",
+        ]))));
+        assert_eq!(a.file.as_ref().map(|f| f.path.as_str()), Some("inbox.org"));
+        // Neither there: nothing opens.
+        let mut a = app().with_state(Some(state_path));
+        open(&mut a, &["notes.org"]);
+        assert!(a.file.is_none());
     }
 
     #[test]
