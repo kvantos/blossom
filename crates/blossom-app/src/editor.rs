@@ -441,25 +441,29 @@ mod tests {
             bind(press(ch("ƒ"), Physical::Code(Code::KeyF), ALT), true),
             Some(Binding::Move(Motion::WordRight))
         );
-        // Undo and the plain keys still work.
-        // The app's shortcuts pass by; Ctrl+Shift+V pastes (an image too).
-        let both = CTRL | keyboard::Modifiers::SHIFT;
-        if cfg!(not(target_os = "macos")) {
-            assert_eq!(bind(press(ch("A"), NONE, both), true), None);
-            assert_eq!(bind(press(ch("N"), NONE, both), false), None);
-            assert_eq!(
-                bind(press(ch("V"), NONE, both), true),
-                Some(Binding::Custom(Command::Paste))
-            );
-        }
-        assert_eq!(b("z", CTRL), Some(Binding::Custom(Command::Undo)));
-        // Off: C-y redoes and C-a selects all, as before.
+        // The platform's command key: Cmd on macOS (where C- stays Control,
+        // so the two never meet), Ctrl elsewhere.
+        let mac = cfg!(target_os = "macos");
+        let cmd = if mac { keyboard::Modifiers::LOGO } else { CTRL };
+        let shift = keyboard::Modifiers::SHIFT;
+        // The app's shortcuts pass by (Ctrl+Shift+N on Linux, ⌘N on
+        // macOS); Ctrl+Shift+V or ⌘V pastes (an image too).
+        assert_eq!(bind(press(ch("A"), NONE, cmd | shift), true), None);
+        let capture = if mac { cmd } else { cmd | shift };
+        assert_eq!(bind(press(ch("N"), NONE, capture), false), None);
         assert_eq!(
-            bind(press(ch("y"), NONE, CTRL), false),
+            bind(press(ch("V"), NONE, cmd | shift), true),
+            Some(Binding::Custom(Command::Paste))
+        );
+        // Undo still works with the keys on.
+        assert_eq!(b("z", cmd), Some(Binding::Custom(Command::Undo)));
+        // Off: Ctrl+Y (⌘Y) redoes and Ctrl+A (⌘A) selects all, as before.
+        assert_eq!(
+            bind(press(ch("y"), NONE, cmd), false),
             Some(Binding::Custom(Command::Redo))
         );
         assert_eq!(
-            bind(press(ch("a"), NONE, CTRL), false),
+            bind(press(ch("a"), NONE, cmd), false),
             Some(Binding::SelectAll)
         );
     }
